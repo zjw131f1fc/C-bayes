@@ -50,11 +50,22 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx, output_dir=
     model_cfg = config['model']
 
     # 获取观测特征配置
-    X_obs_names = list(td_train['X_obs_names'])
-    X_obs_train = td_train['X_obs'].copy()
+    X_obs_names_orig = list(td_train['X_obs_names'])
+    X_obs_orig = td_train['X_obs'].copy()
+    X_obs_names = list(X_obs_names_orig)
+    X_obs_train = X_obs_orig.copy()
     spline_features = model_cfg['spline_features'] or []
     exclude_obs = model_cfg.get('exclude_obs_features') or []
+    obs_interaction = model_cfg.get('obs_interaction_features') or []
     center_features = model_cfg.get('center_features', False)
+
+    # 添加观测特征交互项
+    if obs_interaction:
+        from src.model import _parse_interaction
+        for expr in obs_interaction:
+            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
+            X_obs_train = np.column_stack([X_obs_train, new_col])
+            X_obs_names.append(new_name)
 
     # 过滤掉排除的观测特征
     if exclude_obs:
@@ -287,11 +298,22 @@ def predict(config, train_datas, eval_datas):
     pro_idx = td['pro_idx']
 
     # 获取观测特征配置
-    X_obs = td['X_obs'].copy()
-    X_obs_names = list(td['X_obs_names'])
+    X_obs_orig = td['X_obs'].copy()
+    X_obs_names_orig = list(td['X_obs_names'])
+    X_obs = X_obs_orig.copy()
+    X_obs_names = list(X_obs_names_orig)
     spline_features = model_cfg['spline_features'] or []
     exclude_obs = model_cfg.get('exclude_obs_features') or []
+    obs_interaction = model_cfg.get('obs_interaction_features') or []
     center_features = model_cfg.get('center_features', False)
+
+    # 添加观测特征交互项
+    if obs_interaction:
+        from src.model import _parse_interaction
+        for expr in obs_interaction:
+            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
+            X_obs = np.column_stack([X_obs, new_col])
+            X_obs_names.append(new_name)
 
     # 过滤掉排除的观测特征
     if exclude_obs:

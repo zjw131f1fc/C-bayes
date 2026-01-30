@@ -28,6 +28,9 @@ model:
   celeb_interaction_features:
     - "log_us_state_pop * (1 - is_international)"  # 只对美国选手有效
 
+  # 观测特征交互项（测试后效果不佳，已禁用）
+  obs_interaction_features: null
+
   # 特征中心化
   center_features: true
 
