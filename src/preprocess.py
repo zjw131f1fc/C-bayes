@@ -63,6 +63,22 @@ def validate_data(datas):
     if td['X_obs'].dtype != np.float32:
         errors.append(f"X_obs 类型 {td['X_obs'].dtype} != float32")
 
+    # 3.5 NaN/Inf 检查
+    if np.isnan(td['X_celeb']).any():
+        nan_cols = [td['X_celeb_names'][i] for i in range(td['X_celeb'].shape[1])
+                    if np.isnan(td['X_celeb'][:, i]).any()]
+        errors.append(f"X_celeb 含 NaN: {nan_cols}")
+    if np.isnan(td['X_pro']).any():
+        nan_cols = [td['X_pro_names'][i] for i in range(td['X_pro'].shape[1])
+                    if np.isnan(td['X_pro'][:, i]).any()]
+        errors.append(f"X_pro 含 NaN: {nan_cols}")
+    if np.isnan(td['X_obs']).any():
+        nan_cols = [td['X_obs_names'][i] for i in range(td['X_obs'].shape[1])
+                    if np.isnan(td['X_obs'][:, i]).any()]
+        errors.append(f"X_obs 含 NaN: {nan_cols}")
+    if np.isinf(td['X_celeb']).any() or np.isinf(td['X_pro']).any() or np.isinf(td['X_obs']).any():
+        errors.append("特征矩阵含 Inf")
+
     # 4. 特征名称数量匹配
     if len(td['X_celeb_names']) != td['X_celeb'].shape[1]:
         errors.append(f"X_celeb_names 数量 {len(td['X_celeb_names'])} != X_celeb 列数 {td['X_celeb'].shape[1]}")

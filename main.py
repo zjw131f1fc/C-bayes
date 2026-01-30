@@ -142,7 +142,7 @@ if __name__ == "__main__":
     datas = {}
 
     # 加载数据
-    datas = load_data('datas(1).pkl', datas)
+    datas = load_data('datas.pkl', datas)
     # datas = load_mock_data(config, datas)   # 测试用模拟数据
 
     # 校验数据
