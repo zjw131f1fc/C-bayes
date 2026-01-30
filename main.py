@@ -7,6 +7,9 @@ MCM 2026 Problem C - 与星共舞粉丝投票预测
 import os
 os.environ['JAX_PLATFORM_NAME'] = 'cpu'
 
+import numpyro
+numpyro.set_host_device_count(4)  # CPU 上模拟多设备以支持多链并行
+
 import numpy as np
 from scipy.special import softmax
 from patsy import dmatrix
