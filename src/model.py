@@ -1,4 +1,4 @@
-"""贝叶斯模型 (NumPyro 版本)"""
+"""贝叶斯模型 (NumPyro 版本) - 向量化实现"""
 
 import numpy as np
 import jax
@@ -19,8 +19,61 @@ def _build_spline_basis(x, n_knots, degree):
     return np.asarray(basis, dtype=np.float32)
 
 
-def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases):
-    """NumPyro 模型定义"""
+def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_score):
+    """预处理week_data为向量化格式"""
+    n_weeks = len(week_data)
+    max_contestants = max(wd['n_contestants'] for wd in week_data)
+    max_elim = max(wd['n_eliminated'] for wd in week_data if wd['n_eliminated'] > 0)
+
+    # 索引数组: [n_weeks, max_contestants]
+    week_indices = np.full((n_weeks, max_contestants), -1, dtype=np.int32)
+    week_mask = np.zeros((n_weeks, max_contestants), dtype=bool)
+
+    # 淘汰索引: [n_weeks, max_elim] (局部索引)
+    elim_local = np.full((n_weeks, max_elim), -1, dtype=np.int32)
+    elim_mask = np.zeros((n_weeks, max_elim), dtype=bool)
+    n_elim_per_week = np.zeros(n_weeks, dtype=np.int32)
+
+    # 规则和分数
+    rule_method = np.zeros(n_weeks, dtype=np.int32)
+    judge_pct_padded = np.zeros((n_weeks, max_contestants), dtype=np.float32)
+    judge_rank_padded = np.zeros((n_weeks, max_contestants), dtype=np.float32)
+
+    for w, wd in enumerate(week_data):
+        indices = np.where(wd['obs_mask'])[0]
+        n_cont = len(indices)
+        week_indices[w, :n_cont] = indices
+        week_mask[w, :n_cont] = True
+        rule_method[w] = wd['rule_method']
+        judge_pct_padded[w, :n_cont] = judge_score_pct[indices]
+        judge_rank_padded[w, :n_cont] = judge_rank_score[indices]
+
+        # 淘汰信息
+        n_elim = wd['n_eliminated']
+        n_elim_per_week[w] = n_elim
+        if n_elim > 0:
+            elim_global = np.where(wd['eliminated_mask'])[0]
+            for i, eg in enumerate(elim_global):
+                elim_local[w, i] = np.where(indices == eg)[0][0]
+                elim_mask[w, i] = True
+
+    return {
+        'week_indices': week_indices,
+        'week_mask': week_mask,
+        'elim_local': elim_local,
+        'elim_mask': elim_mask,
+        'n_elim_per_week': n_elim_per_week,
+        'rule_method': rule_method,
+        'judge_pct_padded': judge_pct_padded,
+        'judge_rank_padded': judge_rank_padded,
+        'n_weeks': n_weeks,
+        'max_contestants': max_contestants,
+        'max_elim': max_elim,
+    }
+
+
+def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
+    """NumPyro 模型定义 (向量化版本)"""
     n_celebs = train_data['n_celebs']
     n_pros = train_data['n_pros']
     n_obs = train_data['n_obs']
@@ -64,37 +117,55 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases):
     mu = alpha[celeb_idx] + delta[pro_idx] + lin_contrib + spline_contrib
     numpyro.deterministic('mu', mu)
 
-    # 按周分组 softmax 计算 P_fan
-    week_data = train_data['week_data']
+    # === 向量化: 按周分组 softmax 计算 P_fan ===
+    week_indices = vec_week['week_indices']  # [n_weeks, max_contestants]
+    week_mask = vec_week['week_mask']        # [n_weeks, max_contestants]
+
+    # 用0填充无效索引，取mu值后用mask处理
+    safe_indices = jnp.where(week_indices >= 0, week_indices, 0)
+    mu_padded = mu[safe_indices]  # [n_weeks, max_contestants]
+    mu_masked = jnp.where(week_mask, mu_padded, -jnp.inf)
+    P_fan_padded = jax.nn.softmax(mu_masked, axis=1)  # [n_weeks, max_contestants]
+    P_fan_padded = jnp.where(week_mask, P_fan_padded, 0.0)
+
+    # 散射回原始索引
     P_fan = jnp.zeros(n_obs)
-    for wd in week_data:
-        mask = wd['obs_mask']
-        indices = np.where(mask)[0]
-        mu_week = mu[indices]
-        P_week = jax.nn.softmax(mu_week)
-        P_fan = P_fan.at[indices].set(P_week)
+    for w in range(vec_week['n_weeks']):
+        valid_mask = week_mask[w]
+        indices_w = jnp.where(valid_mask, week_indices[w], 0)
+        P_fan = P_fan.at[indices_w].set(
+            jnp.where(valid_mask, P_fan_padded[w], P_fan[indices_w])
+        )
     numpyro.deterministic('P_fan', P_fan)
 
-    # 综合得分 S
-    S = jnp.zeros(n_obs)
-    for wd in week_data:
-        mask = wd['obs_mask']
-        indices = np.where(mask)[0]
-        rule = wd['rule_method']
+    # === 向量化: 综合得分 S ===
+    rule_method = vec_week['rule_method']  # [n_weeks]
+    judge_pct = vec_week['judge_pct_padded']   # [n_weeks, max_contestants]
+    judge_rank = vec_week['judge_rank_padded'] # [n_weeks, max_contestants]
 
-        if rule == 1:  # 百分比法
-            S_week = train_data['judge_score_pct'][indices] + P_fan[indices]
-        else:  # 排名法
-            P_week = P_fan[indices]
-            n_contestants = len(indices)
-            if n_contestants > 1:
-                diff = P_week[:, None] - P_week[None, :]
-                soft_rank = jnp.sum(jax.nn.sigmoid(diff / 0.1), axis=1) - 0.5
-                R_fan = soft_rank / (n_contestants - 1)
-            else:
-                R_fan = jnp.array([0.5])
-            S_week = train_data['judge_rank_score'][indices] + R_fan
-        S = S.at[indices].set(S_week)
+    # 百分比法: S = judge_pct + P_fan
+    S_pct = judge_pct + P_fan_padded
+
+    # 排名法: soft_rank
+    n_contestants_per_week = week_mask.sum(axis=1, keepdims=True)  # [n_weeks, 1]
+    diff = P_fan_padded[:, :, None] - P_fan_padded[:, None, :]  # [n_weeks, max, max]
+    soft_rank = jnp.sum(jax.nn.sigmoid(diff / 0.1) * week_mask[:, None, :], axis=2) - 0.5
+    R_fan = soft_rank / jnp.maximum(n_contestants_per_week - 1, 1)
+    S_rank = judge_rank + R_fan
+
+    # 根据rule选择
+    is_pct = (rule_method == 1)[:, None]  # [n_weeks, 1]
+    S_padded = jnp.where(is_pct, S_pct, S_rank)
+    S_padded = jnp.where(week_mask, S_padded, 0.0)
+
+    # 散射回原始索引
+    S = jnp.zeros(n_obs)
+    for w in range(vec_week['n_weeks']):
+        valid_mask = week_mask[w]
+        indices_w = jnp.where(valid_mask, week_indices[w], 0)
+        S = S.at[indices_w].set(
+            jnp.where(valid_mask, S_padded[w], S[indices_w])
+        )
     numpyro.deterministic('S', S)
 
     # 似然函数温度参数 τ
@@ -103,29 +174,43 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases):
     else:
         tau = model_cfg['tau_init']
 
-    # Plackett-Luce 似然
-    total_ll = 0.0
-    for wd in week_data:
-        n_elim = wd['n_eliminated']
-        if n_elim == 0:
-            continue
+    # === 向量化: Plackett-Luce 似然 ===
+    elim_local = vec_week['elim_local']      # [n_weeks, max_elim]
+    elim_mask = vec_week['elim_mask']        # [n_weeks, max_elim]
+    n_elim_per_week = vec_week['n_elim_per_week']  # [n_weeks]
+    max_contestants = vec_week['max_contestants']
 
-        obs_mask = wd['obs_mask']
-        elim_mask = wd['eliminated_mask']
-        indices = np.where(obs_mask)[0]
-        elim_indices = np.where(elim_mask)[0]
+    # S_padded已有，计算neg_tau_S
+    neg_tau_S_padded = -tau * S_padded  # [n_weeks, max_contestants]
 
-        S_w = S[indices]
-        n_contestants = len(indices)
-        elim_local = [np.where(indices == e)[0][0] for e in elim_indices]
+    def pl_week_ll(w):
+        """单周的Plackett-Luce对数似然"""
+        neg_tau_S_w = neg_tau_S_padded[w]
+        valid_contestants = week_mask[w]
+        elim_w = elim_local[w]
+        elim_valid = elim_mask[w]
 
-        remaining = jnp.ones(n_contestants)
-        for e_local in elim_local:
-            neg_tau_S = -tau * S_w
-            log_denom = jax.scipy.special.logsumexp(neg_tau_S + jnp.log(remaining + 1e-10))
-            ll = neg_tau_S[e_local] - log_denom
-            total_ll = total_ll + ll
-            remaining = remaining.at[e_local].set(0.0)
+        def scan_fn(remaining, i):
+            e_idx = elim_w[i]
+            is_valid = elim_valid[i]
+            log_remaining = jnp.log(remaining + 1e-10)
+            log_denom = jax.scipy.special.logsumexp(neg_tau_S_w + log_remaining)
+            ll = neg_tau_S_w[e_idx] - log_denom
+            ll = jnp.where(is_valid, ll, 0.0)
+            new_remaining = jnp.where(
+                is_valid,
+                remaining.at[e_idx].set(0.0),
+                remaining
+            )
+            return new_remaining, ll
+
+        init_remaining = valid_contestants.astype(jnp.float32)
+        _, lls = jax.lax.scan(scan_fn, init_remaining, jnp.arange(vec_week['max_elim']))
+        return lls.sum()
+
+    # 对所有周求和
+    total_ll = sum(pl_week_ll(w) for w in range(vec_week['n_weeks'])
+                   if n_elim_per_week[w] > 0)
 
     numpyro.factor('likelihood', total_ll)
 
@@ -147,13 +232,21 @@ def build_model(config, datas):
     spline_bases = [_build_spline_basis(X_obs[:, c], model_cfg['n_spline_knots'],
                                         model_cfg['spline_degree']) for c in spline_cols]
 
-    # 返回模型配置（NumPyro 在 train 时才真正构建）
+    # 构建向量化week数据
+    vec_week = _build_vectorized_week_data(
+        train_data['week_data'],
+        train_data['n_obs'],
+        train_data['judge_score_pct'],
+        train_data['judge_rank_score']
+    )
+
     return {
         'train_data': train_data,
         'prior': config['prior'],
         'model_cfg': model_cfg,
         'X_lin': X_lin,
         'spline_bases': spline_bases,
+        'vec_week': vec_week,
     }
 
 
@@ -180,7 +273,8 @@ def train(config, model_params, datas):
              prior=model_params['prior'],
              model_cfg=model_params['model_cfg'],
              X_lin=model_params['X_lin'],
-             spline_bases=model_params['spline_bases'])
+             spline_bases=model_params['spline_bases'],
+             vec_week=model_params['vec_week'])
 
     print("    [train] MCMC completed")
     datas['mcmc'] = mcmc
