@@ -1,0 +1,26 @@
+# Data files
+*.pkl
+*.pickle
+data/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# Output
+outputs/
+results/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
