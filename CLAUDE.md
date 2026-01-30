@@ -1,5 +1,9 @@
 # 编码规范
 
+## 环境
+
+conda activate MCM
+
 ## 核心接口
 
 ```python

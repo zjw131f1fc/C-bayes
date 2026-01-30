@@ -1,0 +1,43 @@
+# config.yaml
+
+model:
+  # Student-T 分布
+  use_student_t: true
+  student_t_nu: 5.0
+
+  # 样条设置（从 X_obs_names 中选）
+  spline_features:
+    - z_score
+    - weeks_survived
+  n_spline_knots: 5
+  spline_degree: 3
+
+  # 正则化
+  use_horseshoe: true
+
+  # 似然函数
+  tau_init: 1.0
+  learn_tau: true
+
+  # 约束
+  sum_to_zero: true
+
+prior:
+  sigma_celeb: { a: 2.0, b: 1.0 }
+  sigma_pro: { a: 2.0, b: 1.0 }
+  beta_celeb_scale: 2.5
+  beta_pro_scale: 2.5
+  beta_obs_scale: 2.5
+  spline_smoothing_scale: 1.0
+
+sampling:
+  n_chains: 1
+  n_tune: 100
+  n_samples: 200
+  target_accept: 0.9
+  random_seed: 42
+  cores: 1
+
+output:
+  dir: outputs/model
+  save_trace: true
