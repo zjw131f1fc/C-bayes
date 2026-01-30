@@ -3,6 +3,10 @@ MCM 2026 Problem C - 与星共舞粉丝投票预测
 分层贝叶斯模型 + GAM 框架
 """
 
+# 强制使用 CPU（必须在 import jax 之前设置）
+import os
+os.environ['JAX_PLATFORM_NAME'] = 'cpu'
+
 import numpy as np
 from scipy.special import softmax
 from patsy import dmatrix
