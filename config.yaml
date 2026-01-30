@@ -3,11 +3,24 @@
 model:
 
   # 样条设置（从 X_obs_names 中选）
-  spline_features:
-    - z_score
-    - weeks_survived
+  spline_features: null
   n_spline_knots: 5
   spline_degree: 3
+
+  # 排除的特征（解决高度共线性）
+  exclude_features:
+    - age_centered      # 与 age 完全相同 (r=1.0)
+    - age_squared       # 与 age 高度相关 (r=0.979)
+    - age_bucket_old    # 与 age 高度相关 (r=0.738)
+    - judge_save_active # 与 rule_method 高度负相关 (r=-0.931)
+    - log_us_state_pop  # 用交互项替代
+
+  # 交互项：格式为 "feat1 * feat2" 或 "feat1 * (1 - feat2)"
+  interaction_features:
+    - "log_us_state_pop * (1 - is_international)"  # 只对美国选手有效
+
+  # 特征中心化
+  center_features: true
 
   # 正则化
   use_horseshoe: true

@@ -49,9 +49,37 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx, output_dir=
     td_test = test_datas['train_data']
     model_cfg = config['model']
 
-    # 获取特征信息
-    X_obs_names = td_train['X_obs_names']
-    spline_features = model_cfg['spline_features']
+    # 获取原始特征信息
+    X_obs_names_orig = list(td_train['X_obs_names'])
+    X_obs_orig = td_train['X_obs'].copy()
+
+    # 获取特征配置
+    X_obs_names = list(X_obs_names_orig)
+    X_obs_train = X_obs_orig.copy()
+    spline_features = model_cfg['spline_features'] or []
+    exclude_features = model_cfg.get('exclude_features') or []
+    interaction_features = model_cfg.get('interaction_features') or []
+    center_features = model_cfg.get('center_features', False)
+
+    # 添加交互项
+    if interaction_features:
+        from src.model import _parse_interaction
+        for expr in interaction_features:
+            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
+            X_obs_train = np.column_stack([X_obs_train, new_col])
+            X_obs_names.append(new_name)
+
+    # 过滤掉排除的特征
+    if exclude_features:
+        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_features]
+        X_obs_train = X_obs_train[:, keep_cols]
+        X_obs_names = [X_obs_names[i] for i in keep_cols]
+
+    # 使用训练集的均值进行中心化
+    feature_means = train_datas.get('feature_means')
+    if center_features and feature_means is not None:
+        X_obs_train = X_obs_train - feature_means
+
     spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
     linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
 
@@ -65,7 +93,7 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx, output_dir=
     alpha_contrib = alpha_mean[td_train['celeb_idx']]
     delta_contrib = delta_mean[td_train['pro_idx']]
 
-    X_lin = td_train['X_obs'][:, linear_cols] if linear_cols else None
+    X_lin = X_obs_train[:, linear_cols] if linear_cols else None
     linear_contrib = np.zeros(td_train['n_obs'])
     if X_lin is not None and 'beta_obs' in posterior:
         beta_obs = posterior['beta_obs'].mean(axis=0)
@@ -76,7 +104,7 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx, output_dir=
         key = f'spline_{i}_coef'
         if key in posterior:
             coef = posterior[key].mean(axis=0)
-            basis = _build_spline_basis(td_train['X_obs'][:, col],
+            basis = _build_spline_basis(X_obs_train[:, col],
                                         model_cfg['n_spline_knots'], model_cfg['spline_degree'])
             spline_contrib += basis @ coef
 
@@ -110,7 +138,7 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx, output_dir=
 
         for i, col in enumerate(spline_cols):
             feature_name = X_obs_names[col]
-            x_vals = td_train['X_obs'][:, col]
+            x_vals = X_obs_train[:, col]
 
             # 计算该特征的样条贡献
             key = f'spline_{i}_coef'
@@ -144,7 +172,7 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx, output_dir=
     axes = np.atleast_2d(axes).flatten()
 
     for i, name in enumerate(X_obs_names):
-        x_vals = td_train['X_obs'][:, i]
+        x_vals = X_obs_train[:, i]
         axes[i].scatter(x_vals, mu, alpha=0.3, s=10)
         axes[i].set_xlabel(name, fontsize=11)
         axes[i].set_ylabel('mu', fontsize=11)
@@ -271,11 +299,38 @@ def predict(config, train_datas, eval_datas):
     celeb_idx = td['celeb_idx']
     pro_idx = td['pro_idx']
 
-    # 分离线性/样条特征
-    X_obs = td['X_obs']
-    X_obs_names = td['X_obs_names']
-    spline_features = model_cfg['spline_features']
+    # 获取原始特征（用于构造交互项）
+    X_obs_orig = td['X_obs'].copy()
+    X_obs_names_orig = list(td['X_obs_names'])
 
+    # 获取特征配置
+    X_obs = X_obs_orig.copy()
+    X_obs_names = list(X_obs_names_orig)
+    spline_features = model_cfg['spline_features'] or []
+    exclude_features = model_cfg.get('exclude_features') or []
+    interaction_features = model_cfg.get('interaction_features') or []
+    center_features = model_cfg.get('center_features', False)
+
+    # 添加交互项
+    if interaction_features:
+        from src.model import _parse_interaction
+        for expr in interaction_features:
+            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
+            X_obs = np.column_stack([X_obs, new_col])
+            X_obs_names.append(new_name)
+
+    # 过滤掉排除的特征
+    if exclude_features:
+        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_features]
+        X_obs = X_obs[:, keep_cols]
+        X_obs_names = [X_obs_names[i] for i in keep_cols]
+
+    # 使用训练集的均值进行中心化
+    feature_means = train_datas.get('feature_means')
+    if center_features and feature_means is not None:
+        X_obs = X_obs - feature_means
+
+    # 分离线性/样条特征
     spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
     linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
 
@@ -344,6 +399,7 @@ def run_cv(config, datas):
     cv_results = []
 
     for test_season in range(n_seasons):
+        test_season = 10
         print(f"\n=== CV Fold {test_season + 1}/{n_seasons}: 测试赛季 {test_season} ===")
 
         print("  [DEBUG] filter_data...")
@@ -369,10 +425,18 @@ def run_cv(config, datas):
             'metrics': test_datas.get('metrics', {}),
         })
 
-        # 第一折结束后画诊断图
-        if test_season == 0:
+        # 第一折结束后画诊断图并保存结果
+        if test_season == 10:
             print("  [DEBUG] visualize_diagnostics...")
-            visualize_diagnostics(config, train_datas, test_datas, fold_idx=0)
+            visualize_diagnostics(config, train_datas, test_datas, fold_idx=10)
+            # 保存结果用于分析
+            fold0_results = {
+                'train_datas': train_datas,
+                'test_datas': test_datas,
+                'config': config,
+            }
+            save_data(fold0_results, 'fold0_results.pkl')
+            print("  [DEBUG] Saved fold0_results.pkl")
 
     return cv_results
 

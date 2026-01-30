@@ -222,16 +222,76 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
     numpyro.factor('likelihood', total_ll)
 
 
+def _parse_interaction(expr, X_obs_orig, X_obs_names_orig):
+    """解析交互项表达式并计算新特征"""
+    import re
+    expr = expr.strip()
+
+    # 匹配 "feat1 * (1 - feat2)" 格式
+    match = re.match(r'(\w+)\s*\*\s*\(1\s*-\s*(\w+)\)', expr)
+    if match:
+        feat1, feat2 = match.groups()
+        idx1 = X_obs_names_orig.index(feat1)
+        idx2 = X_obs_names_orig.index(feat2)
+        new_col = X_obs_orig[:, idx1] * (1 - X_obs_orig[:, idx2])
+        new_name = f"{feat1}_x_not_{feat2}"
+        return new_col, new_name
+
+    # 匹配 "feat1 * feat2" 格式
+    match = re.match(r'(\w+)\s*\*\s*(\w+)', expr)
+    if match:
+        feat1, feat2 = match.groups()
+        idx1 = X_obs_names_orig.index(feat1)
+        idx2 = X_obs_names_orig.index(feat2)
+        new_col = X_obs_orig[:, idx1] * X_obs_orig[:, idx2]
+        new_name = f"{feat1}_x_{feat2}"
+        return new_col, new_name
+
+    raise ValueError(f"无法解析交互项表达式: {expr}")
+
+
 def build_model(config, datas):
     """构建模型参数（NumPyro 不需要预构建模型对象）"""
     train_data = datas['train_data']
     model_cfg = config['model']
 
-    # 分离线性/样条特征
-    X_obs = train_data['X_obs']
-    X_obs_names = train_data['X_obs_names']
-    spline_features = model_cfg['spline_features']
+    # 获取原始特征（用于构造交互项）
+    X_obs_orig = train_data['X_obs'].copy()
+    X_obs_names_orig = list(train_data['X_obs_names'])
 
+    # 获取特征配置
+    X_obs = X_obs_orig.copy()
+    X_obs_names = list(X_obs_names_orig)
+    spline_features = model_cfg['spline_features'] or []
+    exclude_features = model_cfg.get('exclude_features') or []
+    interaction_features = model_cfg.get('interaction_features') or []
+    center_features = model_cfg.get('center_features', False)
+
+    # 添加交互项（在排除特征之前，使用原始特征计算）
+    if interaction_features:
+        print(f"  [build_model] Adding interaction features:")
+        for expr in interaction_features:
+            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
+            X_obs = np.column_stack([X_obs, new_col])
+            X_obs_names.append(new_name)
+            print(f"    + {new_name} (from: {expr})")
+
+    # 过滤掉排除的特征
+    if exclude_features:
+        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_features]
+        X_obs = X_obs[:, keep_cols]
+        X_obs_names = [X_obs_names[i] for i in keep_cols]
+        print(f"  [build_model] Excluded features: {exclude_features}")
+        print(f"  [build_model] Remaining features ({len(X_obs_names)}): {X_obs_names}")
+
+    # 特征中心化
+    feature_means = None
+    if center_features:
+        feature_means = X_obs.mean(axis=0)
+        X_obs = X_obs - feature_means
+        print(f"  [build_model] Centered {len(X_obs_names)} features")
+
+    # 分离线性/样条特征
     spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
     linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
 
@@ -254,6 +314,9 @@ def build_model(config, datas):
         'X_lin': X_lin,
         'spline_bases': spline_bases,
         'vec_week': vec_week,
+        'feature_means': feature_means,
+        'X_obs_names': X_obs_names,
+        'X_obs_names_orig': X_obs_names_orig,  # 保存原始特征名用于预测
     }
 
 
@@ -286,6 +349,9 @@ def train(config, model_params, datas):
     print("    [train] MCMC completed")
     datas['mcmc'] = mcmc
     datas['trace'] = mcmc.get_samples()
+    # 保存特征处理信息用于预测
+    datas['feature_means'] = model_params.get('feature_means')
+    datas['X_obs_names_filtered'] = model_params.get('X_obs_names')
     return datas
 
 
@@ -384,9 +450,34 @@ def generate_output(config, datas):
     week_idx = td['week_idx']
     n_obs = td['n_obs']
 
-    X_obs = td['X_obs']
-    X_obs_names = td['X_obs_names']
-    spline_features = model_cfg['spline_features']
+    # 获取原始特征
+    X_obs_orig = td['X_obs'].copy()
+    X_obs_names_orig = list(td['X_obs_names'])
+
+    X_obs = X_obs_orig.copy()
+    X_obs_names = list(X_obs_names_orig)
+    spline_features = model_cfg['spline_features'] or []
+    exclude_features = model_cfg.get('exclude_features') or []
+    interaction_features = model_cfg.get('interaction_features') or []
+    center_features = model_cfg.get('center_features', False)
+
+    # 添加交互项
+    if interaction_features:
+        for expr in interaction_features:
+            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
+            X_obs = np.column_stack([X_obs, new_col])
+            X_obs_names.append(new_name)
+
+    # 过滤掉排除的特征
+    if exclude_features:
+        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_features]
+        X_obs = X_obs[:, keep_cols]
+        X_obs_names = [X_obs_names[i] for i in keep_cols]
+
+    # 使用训练集的均值进行中心化
+    feature_means = datas.get('feature_means')
+    if center_features and feature_means is not None:
+        X_obs = X_obs - feature_means
 
     spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
     linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
