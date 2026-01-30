@@ -250,46 +250,69 @@ def _parse_interaction(expr, X_obs_orig, X_obs_names_orig):
     raise ValueError(f"无法解析交互项表达式: {expr}")
 
 
+def _process_celeb_features(train_data, model_cfg):
+    """处理名人特征：交互项和排除"""
+    X_celeb_orig = train_data['X_celeb'].copy()
+    X_celeb_names_orig = list(train_data['X_celeb_names'])
+
+    X_celeb = X_celeb_orig.copy()
+    X_celeb_names = list(X_celeb_names_orig)
+
+    celeb_interaction = model_cfg.get('celeb_interaction_features') or []
+    exclude_celeb = model_cfg.get('exclude_celeb_features') or []
+
+    # 添加交互项
+    if celeb_interaction:
+        print(f"  [build_model] Adding celeb interaction features:")
+        for expr in celeb_interaction:
+            new_col, new_name = _parse_interaction(expr, X_celeb_orig, X_celeb_names_orig)
+            X_celeb = np.column_stack([X_celeb, new_col])
+            X_celeb_names.append(new_name)
+            print(f"    + {new_name} (from: {expr})")
+
+    # 排除特征
+    if exclude_celeb:
+        keep_cols = [i for i, name in enumerate(X_celeb_names) if name not in exclude_celeb]
+        X_celeb = X_celeb[:, keep_cols]
+        X_celeb_names = [X_celeb_names[i] for i in keep_cols]
+        print(f"  [build_model] Excluded celeb features: {exclude_celeb}")
+        print(f"  [build_model] Remaining celeb features ({len(X_celeb_names)}): {X_celeb_names}")
+
+    return X_celeb.astype(np.float32), X_celeb_names
+
+
 def build_model(config, datas):
     """构建模型参数（NumPyro 不需要预构建模型对象）"""
     train_data = datas['train_data']
     model_cfg = config['model']
 
-    # 获取原始特征（用于构造交互项）
+    # === 处理名人特征 ===
+    X_celeb, X_celeb_names = _process_celeb_features(train_data, model_cfg)
+
+    # === 处理观测特征 ===
     X_obs_orig = train_data['X_obs'].copy()
     X_obs_names_orig = list(train_data['X_obs_names'])
 
-    # 获取特征配置
     X_obs = X_obs_orig.copy()
     X_obs_names = list(X_obs_names_orig)
     spline_features = model_cfg['spline_features'] or []
-    exclude_features = model_cfg.get('exclude_features') or []
-    interaction_features = model_cfg.get('interaction_features') or []
+    exclude_obs = model_cfg.get('exclude_obs_features') or []
     center_features = model_cfg.get('center_features', False)
 
-    # 添加交互项（在排除特征之前，使用原始特征计算）
-    if interaction_features:
-        print(f"  [build_model] Adding interaction features:")
-        for expr in interaction_features:
-            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
-            X_obs = np.column_stack([X_obs, new_col])
-            X_obs_names.append(new_name)
-            print(f"    + {new_name} (from: {expr})")
-
-    # 过滤掉排除的特征
-    if exclude_features:
-        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_features]
+    # 过滤掉排除的观测特征
+    if exclude_obs:
+        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_obs]
         X_obs = X_obs[:, keep_cols]
         X_obs_names = [X_obs_names[i] for i in keep_cols]
-        print(f"  [build_model] Excluded features: {exclude_features}")
-        print(f"  [build_model] Remaining features ({len(X_obs_names)}): {X_obs_names}")
+        print(f"  [build_model] Excluded obs features: {exclude_obs}")
+        print(f"  [build_model] Remaining obs features ({len(X_obs_names)}): {X_obs_names}")
 
     # 特征中心化
     feature_means = None
     if center_features:
         feature_means = X_obs.mean(axis=0)
         X_obs = X_obs - feature_means
-        print(f"  [build_model] Centered {len(X_obs_names)} features")
+        print(f"  [build_model] Centered {len(X_obs_names)} obs features")
 
     # 分离线性/样条特征
     spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
@@ -307,8 +330,13 @@ def build_model(config, datas):
         train_data['judge_rank_score']
     )
 
+    # 更新 train_data 中的 X_celeb（用于模型）
+    train_data_updated = dict(train_data)
+    train_data_updated['X_celeb'] = X_celeb
+    train_data_updated['X_celeb_names'] = X_celeb_names
+
     return {
-        'train_data': train_data,
+        'train_data': train_data_updated,
         'prior': config['prior'],
         'model_cfg': model_cfg,
         'X_lin': X_lin,
@@ -316,7 +344,8 @@ def build_model(config, datas):
         'vec_week': vec_week,
         'feature_means': feature_means,
         'X_obs_names': X_obs_names,
-        'X_obs_names_orig': X_obs_names_orig,  # 保存原始特征名用于预测
+        'X_obs_names_orig': X_obs_names_orig,
+        'X_celeb_names': X_celeb_names,
     }
 
 
@@ -450,27 +479,16 @@ def generate_output(config, datas):
     week_idx = td['week_idx']
     n_obs = td['n_obs']
 
-    # 获取原始特征
-    X_obs_orig = td['X_obs'].copy()
-    X_obs_names_orig = list(td['X_obs_names'])
-
-    X_obs = X_obs_orig.copy()
-    X_obs_names = list(X_obs_names_orig)
+    # 获取观测特征
+    X_obs = td['X_obs'].copy()
+    X_obs_names = list(td['X_obs_names'])
     spline_features = model_cfg['spline_features'] or []
-    exclude_features = model_cfg.get('exclude_features') or []
-    interaction_features = model_cfg.get('interaction_features') or []
+    exclude_obs = model_cfg.get('exclude_obs_features') or []
     center_features = model_cfg.get('center_features', False)
 
-    # 添加交互项
-    if interaction_features:
-        for expr in interaction_features:
-            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
-            X_obs = np.column_stack([X_obs, new_col])
-            X_obs_names.append(new_name)
-
-    # 过滤掉排除的特征
-    if exclude_features:
-        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_features]
+    # 过滤掉排除的观测特征
+    if exclude_obs:
+        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_obs]
         X_obs = X_obs[:, keep_cols]
         X_obs_names = [X_obs_names[i] for i in keep_cols]
 
