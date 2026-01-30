@@ -1,9 +1,6 @@
 # config.yaml
 
 model:
-  # Student-T 分布
-  use_student_t: true
-  student_t_nu: 5.0
 
   # 样条设置（从 X_obs_names 中选）
   spline_features:

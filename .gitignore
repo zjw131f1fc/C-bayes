@@ -3,6 +3,9 @@
 # *.pickle
 data/
 
+./start_claude.sh
+
+.jax_cache
 # Python cache
 __pycache__/
 *.py[cod]
