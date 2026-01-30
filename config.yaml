@@ -7,10 +7,17 @@ model:
   n_spline_knots: 5
   spline_degree: 3
 
-  # 排除的特征（解决高度共线性）
+  # 排除的观测特征
   exclude_obs_features:
     - judge_save_active # 与 rule_method 高度负相关 (r=-0.931)
+    - score_trend       # 与 z_score 共线性 (r=0.585)，导致系数反转
+    - is_top_score      # 与 z_score 高度相关 (r=0.585)，系数方向不合理
+    - perfect_score     # 与 z_score 相关 (r=0.283)，系数方向不合理
+    - weeks_survived    # 周内不变，信息量低，不确定性大
+    - season_era        # 周内不变，信息量低，不确定性大
+    - rule_method       # 周内不变，信息量低，不确定性大
 
+  # 排除的名人特征
   exclude_celeb_features:
     - age_centered      # 与 age 完全相同 (r=1.0)
     - age_squared       # 与 age 高度相关 (r=0.979)
