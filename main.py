@@ -148,13 +148,20 @@ if __name__ == "__main__":
     # 校验数据
     datas = validate_data(datas)
 
-    # 交叉验证
-    cv_results = run_cv(config, datas)
-    print(f"\nCV Results: {cv_results}")
-
-    # 全量训练
+    # 1. 先全量训练（快速得到结果）
     print("\n=== 全量训练 ===")
     model, datas = run_single(config, datas)
 
+    # 2. 保存初步结果（即使CV中断也有结果）
     save_data(datas, 'results.pkl')
+    print("初步结果已保存到 results.pkl")
+
+    # 3. 最后再跑交叉验证（耗时）
+    print("\n=== 交叉验证 ===")
+    cv_results = run_cv(config, datas)
+    print(f"\nCV Results: {cv_results}")
+
+    # 4. 保存包含CV结果的完整数据
+    datas['cv_results'] = cv_results
+    save_data(datas, 'results_with_cv.pkl')
     print("Done!")
