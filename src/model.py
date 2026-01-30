@@ -30,14 +30,19 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
     week_mask = np.zeros((n_weeks, max_contestants), dtype=bool)
 
     # 淘汰索引: [n_weeks, max_elim] (局部索引)
-    elim_local = np.full((n_weeks, max_elim), -1, dtype=np.int32)
+    elim_local = np.full((n_weeks, max_elim), 0, dtype=np.int32)  # 用0而非-1，避免索引问题
     elim_mask = np.zeros((n_weeks, max_elim), dtype=bool)
     n_elim_per_week = np.zeros(n_weeks, dtype=np.int32)
+    has_elim = np.zeros(n_weeks, dtype=bool)  # 标记哪些周有淘汰
 
     # 规则和分数
     rule_method = np.zeros(n_weeks, dtype=np.int32)
     judge_pct_padded = np.zeros((n_weeks, max_contestants), dtype=np.float32)
     judge_rank_padded = np.zeros((n_weeks, max_contestants), dtype=np.float32)
+
+    # 反向映射: obs_idx -> (week, position) 用于散射
+    obs_to_week = np.zeros(n_obs, dtype=np.int32)
+    obs_to_pos = np.zeros(n_obs, dtype=np.int32)
 
     for w, wd in enumerate(week_data):
         indices = np.where(wd['obs_mask'])[0]
@@ -48,10 +53,16 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
         judge_pct_padded[w, :n_cont] = judge_score_pct[indices]
         judge_rank_padded[w, :n_cont] = judge_rank_score[indices]
 
+        # 反向映射
+        for pos, obs_idx in enumerate(indices):
+            obs_to_week[obs_idx] = w
+            obs_to_pos[obs_idx] = pos
+
         # 淘汰信息
         n_elim = wd['n_eliminated']
         n_elim_per_week[w] = n_elim
         if n_elim > 0:
+            has_elim[w] = True
             elim_global = np.where(wd['eliminated_mask'])[0]
             for i, eg in enumerate(elim_global):
                 elim_local[w, i] = np.where(indices == eg)[0][0]
@@ -63,17 +74,21 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
         'elim_local': elim_local,
         'elim_mask': elim_mask,
         'n_elim_per_week': n_elim_per_week,
+        'has_elim': has_elim,
         'rule_method': rule_method,
         'judge_pct_padded': judge_pct_padded,
         'judge_rank_padded': judge_rank_padded,
+        'obs_to_week': obs_to_week,
+        'obs_to_pos': obs_to_pos,
         'n_weeks': n_weeks,
+        'n_obs': n_obs,
         'max_contestants': max_contestants,
         'max_elim': max_elim,
     }
 
 
 def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
-    """NumPyro 模型定义 (向量化版本)"""
+    """NumPyro 模型定义 (完全向量化版本)"""
     n_celebs = train_data['n_celebs']
     n_pros = train_data['n_pros']
     n_obs = train_data['n_obs']
@@ -120,6 +135,8 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
     # === 向量化: 按周分组 softmax 计算 P_fan ===
     week_indices = vec_week['week_indices']  # [n_weeks, max_contestants]
     week_mask = vec_week['week_mask']        # [n_weeks, max_contestants]
+    obs_to_week = vec_week['obs_to_week']    # [n_obs]
+    obs_to_pos = vec_week['obs_to_pos']      # [n_obs]
 
     # 用0填充无效索引，取mu值后用mask处理
     safe_indices = jnp.where(week_indices >= 0, week_indices, 0)
@@ -128,14 +145,8 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
     P_fan_padded = jax.nn.softmax(mu_masked, axis=1)  # [n_weeks, max_contestants]
     P_fan_padded = jnp.where(week_mask, P_fan_padded, 0.0)
 
-    # 散射回原始索引
-    P_fan = jnp.zeros(n_obs)
-    for w in range(vec_week['n_weeks']):
-        valid_mask = week_mask[w]
-        indices_w = jnp.where(valid_mask, week_indices[w], 0)
-        P_fan = P_fan.at[indices_w].set(
-            jnp.where(valid_mask, P_fan_padded[w], P_fan[indices_w])
-        )
+    # 向量化散射: 使用预计算的反向映射
+    P_fan = P_fan_padded[obs_to_week, obs_to_pos]
     numpyro.deterministic('P_fan', P_fan)
 
     # === 向量化: 综合得分 S ===
@@ -158,14 +169,8 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
     S_padded = jnp.where(is_pct, S_pct, S_rank)
     S_padded = jnp.where(week_mask, S_padded, 0.0)
 
-    # 散射回原始索引
-    S = jnp.zeros(n_obs)
-    for w in range(vec_week['n_weeks']):
-        valid_mask = week_mask[w]
-        indices_w = jnp.where(valid_mask, week_indices[w], 0)
-        S = S.at[indices_w].set(
-            jnp.where(valid_mask, S_padded[w], S[indices_w])
-        )
+    # 向量化散射: 使用预计算的反向映射
+    S = S_padded[obs_to_week, obs_to_pos]
     numpyro.deterministic('S', S)
 
     # 似然函数温度参数 τ
@@ -174,25 +179,20 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
     else:
         tau = model_cfg['tau_init']
 
-    # === 向量化: Plackett-Luce 似然 ===
+    # === 完全向量化: Plackett-Luce 似然 ===
     elim_local = vec_week['elim_local']      # [n_weeks, max_elim]
     elim_mask = vec_week['elim_mask']        # [n_weeks, max_elim]
-    n_elim_per_week = vec_week['n_elim_per_week']  # [n_weeks]
-    max_contestants = vec_week['max_contestants']
+    has_elim = vec_week['has_elim']          # [n_weeks]
+    max_elim = vec_week['max_elim']
 
-    # S_padded已有，计算neg_tau_S
+    # 计算 neg_tau_S
     neg_tau_S_padded = -tau * S_padded  # [n_weeks, max_contestants]
 
-    def pl_week_ll(w):
-        """单周的Plackett-Luce对数似然"""
-        neg_tau_S_w = neg_tau_S_padded[w]
-        valid_contestants = week_mask[w]
-        elim_w = jnp.array(elim_local[w])  # 转换为 JAX 数组以支持动态索引
-        elim_valid = jnp.array(elim_mask[w])
-
+    def pl_single_week(neg_tau_S_w, valid_contestants, elim_w, elim_valid_w):
+        """单周的Plackett-Luce对数似然 (用于vmap)"""
         def scan_fn(remaining, i):
             e_idx = elim_w[i]
-            is_valid = elim_valid[i]
+            is_valid = elim_valid_w[i]
             log_remaining = jnp.log(remaining + 1e-10)
             log_denom = jax.scipy.special.logsumexp(neg_tau_S_w + log_remaining)
             ll = neg_tau_S_w[e_idx] - log_denom
@@ -205,12 +205,19 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
             return new_remaining, ll
 
         init_remaining = valid_contestants.astype(jnp.float32)
-        _, lls = jax.lax.scan(scan_fn, init_remaining, jnp.arange(vec_week['max_elim']))
+        _, lls = jax.lax.scan(scan_fn, init_remaining, jnp.arange(max_elim))
         return lls.sum()
 
-    # 对所有周求和
-    total_ll = sum(pl_week_ll(w) for w in range(vec_week['n_weeks'])
-                   if n_elim_per_week[w] > 0)
+    # 使用 vmap 并行计算所有周的似然
+    all_week_lls = jax.vmap(pl_single_week)(
+        neg_tau_S_padded,  # [n_weeks, max_contestants]
+        week_mask,         # [n_weeks, max_contestants]
+        elim_local,        # [n_weeks, max_elim]
+        elim_mask          # [n_weeks, max_elim]
+    )
+
+    # 只对有淘汰的周求和
+    total_ll = jnp.sum(jnp.where(has_elim, all_week_lls, 0.0))
 
     numpyro.factor('likelihood', total_ll)
 
