@@ -187,8 +187,8 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
         """单周的Plackett-Luce对数似然"""
         neg_tau_S_w = neg_tau_S_padded[w]
         valid_contestants = week_mask[w]
-        elim_w = elim_local[w]
-        elim_valid = elim_mask[w]
+        elim_w = jnp.array(elim_local[w])  # 转换为 JAX 数组以支持动态索引
+        elim_valid = jnp.array(elim_mask[w])
 
         def scan_fn(remaining, i):
             e_idx = elim_w[i]
