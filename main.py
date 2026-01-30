@@ -7,6 +7,9 @@ MCM 2026 Problem C - 与星共舞粉丝投票预测
 import os
 os.environ['JAX_PLATFORM_NAME'] = 'cpu'
 
+import jax
+jax.config.update("jax_compilation_cache_dir", ".jax_cache")  # 启用编译缓存
+
 import numpyro
 numpyro.set_host_device_count(4)  # CPU 上模拟多设备以支持多链并行
 
