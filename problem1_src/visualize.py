@@ -102,11 +102,13 @@ def plot_posterior_trajectory(datas, celeb_name, celeb_id, output_dir):
     ax.set_xticks(weeks)
     ax.grid(True, alpha=0.3)
 
+    # P_fan 是占比，纵轴固定为 [0, 1]
+    ax.set_ylim(0, 1)
+
     plt.tight_layout()
-    safe_name = celeb_name.replace(' ', '_').replace('/', '_')
-    plt.savefig(f'{output_dir}/fig1_trajectory_{safe_name}.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'{output_dir}/fig1_trajectory_{celeb_name}.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved: {output_dir}/fig1_trajectory_{safe_name}.png")
+    print(f"  Saved: {output_dir}/fig1_trajectory_{celeb_name}.png")
 
 
 def plot_decision_gap(datas, output_dir):
@@ -295,6 +297,70 @@ def find_controversial_and_certain_celebs(datas):
 
     return (controversial_id, celeb_variances[controversial_id]), \
            (certain_id, celeb_variances[certain_id])
+
+
+def get_celebs_by_variance(datas, n_per_group=3):
+    """
+    按方差分组获取选手：高、中、低方差各 n_per_group 个
+
+    返回:
+        list of (celeb_id, variance, group_name)
+    """
+    P_fan_samples = datas['P_fan_samples']
+    td = datas['train_data']
+    celeb_idx = td['celeb_idx']
+    n_celebs = td['n_celebs']
+
+    # 计算每个选手的平均 P_fan 方差
+    celeb_variances = []
+    for c in range(n_celebs):
+        mask = celeb_idx == c
+        if mask.sum() == 0:
+            celeb_variances.append(0)
+            continue
+        var_per_obs = np.var(P_fan_samples[:, mask], axis=0)
+        celeb_variances.append(np.mean(var_per_obs))
+
+    celeb_variances = np.array(celeb_variances)
+
+    # 排除方差为0的选手
+    valid_mask = celeb_variances > 0
+    valid_indices = np.where(valid_mask)[0]
+    valid_variances = celeb_variances[valid_mask]
+
+    if len(valid_indices) == 0:
+        return []
+
+    # 按方差排序
+    sorted_idx = np.argsort(valid_variances)
+    n_valid = len(sorted_idx)
+
+    results = []
+
+    # 高方差（最后 n_per_group 个）
+    for i in range(min(n_per_group, n_valid)):
+        idx = sorted_idx[-(i+1)]
+        cid = valid_indices[idx]
+        results.append((cid, valid_variances[idx], 'high'))
+
+    # 低方差（最前 n_per_group 个）
+    for i in range(min(n_per_group, n_valid)):
+        idx = sorted_idx[i]
+        cid = valid_indices[idx]
+        if (cid, valid_variances[idx], 'high') not in results:
+            results.append((cid, valid_variances[idx], 'low'))
+
+    # 中方差（中间 n_per_group 个）
+    mid_start = n_valid // 2 - n_per_group // 2
+    for i in range(min(n_per_group, n_valid)):
+        idx = sorted_idx[mid_start + i]
+        if idx < 0 or idx >= n_valid:
+            continue
+        cid = valid_indices[idx]
+        if not any(r[0] == cid for r in results):
+            results.append((cid, valid_variances[idx], 'medium'))
+
+    return results
 
 
 def print_summary_stats(datas):

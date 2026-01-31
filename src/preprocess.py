@@ -10,6 +10,13 @@ def load_data(path, datas):
         loaded = pickle.load(f)
     datas['train_data'] = loaded['train_data']
     td = datas['train_data']
+
+    # 如果 X_pro 不存在，创建空占位符
+    if 'X_pro' not in td:
+        td['X_pro'] = np.zeros((td['n_pros'], 0), dtype=np.float32)
+        td['X_pro_names'] = []
+        print("  [load_data] X_pro not found, created empty placeholder")
+
     print(f"Loaded data: {td['n_obs']} obs, {td['n_weeks']} weeks, "
           f"{td['n_celebs']} celebs, {td['n_pros']} pros, {td['n_seasons']} seasons")
     return datas
@@ -36,7 +43,8 @@ def validate_data(datas):
         errors.append(f"season_idx 长度 {len(td['season_idx'])} != n_obs {n_obs}")
     if td['X_celeb'].shape[0] != n_celebs:
         errors.append(f"X_celeb 第一维 {td['X_celeb'].shape[0]} != n_celebs {n_celebs}")
-    if td['X_pro'].shape[0] != n_pros:
+    # X_pro 可能为空（0列），只在有特征时校验
+    if td['X_pro'].shape[1] > 0 and td['X_pro'].shape[0] != n_pros:
         errors.append(f"X_pro 第一维 {td['X_pro'].shape[0]} != n_pros {n_pros}")
     if td['X_obs'].shape[0] != n_obs:
         errors.append(f"X_obs 第一维 {td['X_obs'].shape[0]} != n_obs {n_obs}")
@@ -58,7 +66,8 @@ def validate_data(datas):
         errors.append(f"pro_idx 类型 {td['pro_idx'].dtype} != int32")
     if td['X_celeb'].dtype != np.float32:
         errors.append(f"X_celeb 类型 {td['X_celeb'].dtype} != float32")
-    if td['X_pro'].dtype != np.float32:
+    # X_pro 可能为空，只在有特征时校验类型
+    if td['X_pro'].shape[1] > 0 and td['X_pro'].dtype != np.float32:
         errors.append(f"X_pro 类型 {td['X_pro'].dtype} != float32")
     if td['X_obs'].dtype != np.float32:
         errors.append(f"X_obs 类型 {td['X_obs'].dtype} != float32")
@@ -68,7 +77,8 @@ def validate_data(datas):
         nan_cols = [td['X_celeb_names'][i] for i in range(td['X_celeb'].shape[1])
                     if np.isnan(td['X_celeb'][:, i]).any()]
         errors.append(f"X_celeb 含 NaN: {nan_cols}")
-    if np.isnan(td['X_pro']).any():
+    # X_pro 可能为空，只在有特征时校验
+    if td['X_pro'].shape[1] > 0 and np.isnan(td['X_pro']).any():
         nan_cols = [td['X_pro_names'][i] for i in range(td['X_pro'].shape[1])
                     if np.isnan(td['X_pro'][:, i]).any()]
         errors.append(f"X_pro 含 NaN: {nan_cols}")
@@ -76,13 +86,14 @@ def validate_data(datas):
         nan_cols = [td['X_obs_names'][i] for i in range(td['X_obs'].shape[1])
                     if np.isnan(td['X_obs'][:, i]).any()]
         errors.append(f"X_obs 含 NaN: {nan_cols}")
-    if np.isinf(td['X_celeb']).any() or np.isinf(td['X_pro']).any() or np.isinf(td['X_obs']).any():
+    if np.isinf(td['X_celeb']).any() or (td['X_pro'].shape[1] > 0 and np.isinf(td['X_pro']).any()) or np.isinf(td['X_obs']).any():
         errors.append("特征矩阵含 Inf")
 
     # 4. 特征名称数量匹配
     if len(td['X_celeb_names']) != td['X_celeb'].shape[1]:
         errors.append(f"X_celeb_names 数量 {len(td['X_celeb_names'])} != X_celeb 列数 {td['X_celeb'].shape[1]}")
-    if len(td['X_pro_names']) != td['X_pro'].shape[1]:
+    # X_pro 可能为空，只在有特征时校验
+    if td['X_pro'].shape[1] > 0 and len(td['X_pro_names']) != td['X_pro'].shape[1]:
         errors.append(f"X_pro_names 数量 {len(td['X_pro_names'])} != X_pro 列数 {td['X_pro'].shape[1]}")
     if len(td['X_obs_names']) != td['X_obs'].shape[1]:
         errors.append(f"X_obs_names 数量 {len(td['X_obs_names'])} != X_obs 列数 {td['X_obs'].shape[1]}")
@@ -246,10 +257,10 @@ def _filter_by_mask(td, mask):
         'week_idx': td['week_idx'][mask],
         'season_idx': td['season_idx'][mask],
         'X_celeb': td['X_celeb'],  # 保留全部（名人可能跨赛季）
-        'X_pro': td['X_pro'],      # 保留全部
+        'X_pro': td['X_pro'],      # 保留全部（可能为空）
         'X_obs': td['X_obs'][mask],
         'X_celeb_names': td['X_celeb_names'],
-        'X_pro_names': td['X_pro_names'],
+        'X_pro_names': td.get('X_pro_names', []),  # 可能不存在
         'X_obs_names': td['X_obs_names'],
         'judge_score_pct': td['judge_score_pct'][mask],
         'judge_rank_score': td['judge_rank_score'][mask],

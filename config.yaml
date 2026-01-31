@@ -18,14 +18,23 @@ model:
     - score_trend       # 与 z_score 共线性 (r=0.585)，导致系数反转
     - is_top_score      # 与 z_score 高度相关 (r=0.585)，系数方向不合理
     - perfect_score     # 与 z_score 相关 (r=0.283)，系数方向不合理
+    - has_youtube_video         # SNR=0.30，不确定性高
+    - youtube_view_count_norm   # SNR=0.04，不确定性高
+    - youtube_like_count_norm   # SNR=0.04，不确定性高
+    - youtube_comment_count_norm # SNR=0.35，不确定性高
     # weeks_survived, season_era, rule_method 保留用于交互项
 
   # 排除的名人特征
   exclude_celeb_features:
     - age_centered      # 与 age 完全相同 (r=1.0)
     - age_squared       # 与 age 高度相关 (r=0.979)
+    - age_bucket_young  # 与 age 相关，用样条处理非线性
+    - age_bucket_mid    # 与 age 相关
     - age_bucket_old    # 与 age 高度相关 (r=0.738)
     # log_us_state_pop 已对国际选手置零，直接使用
+
+  # 禁用舞者特征（96.5%方差由性别驱动，个体差异小）
+  use_pro_features: false
 
   # 名人特征交互项
   celeb_interaction_features: null
@@ -36,6 +45,10 @@ model:
     - "pro_avg_rank * z_score"           # 舞者历史排名 × 当周分数
     - "z_score * cumulative_avg_score"   # 当周分数 × 累积平均分
 
+  # 正向先验特征（系数强制为正）
+  positive_prior_features:
+    - z_score  # 观众分与评委分正相关
+
   # 特征中心化
   center_features: true
 
@@ -45,6 +58,10 @@ model:
   # 似然函数
   tau_init: 1.0
   learn_tau: true
+
+  # 评委拯救修正
+  use_judge_save_correction: true  # 是否启用评委拯救修正
+  theta_save_scale: 1.0            # θ_save 先验尺度 (HalfNormal)
 
   # 约束
   sum_to_zero: true

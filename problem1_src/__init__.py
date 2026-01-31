@@ -4,5 +4,6 @@ from .visualize import (
     plot_decision_gap,
     generate_consistency_table,
     find_controversial_and_certain_celebs,
+    get_celebs_by_variance,
     print_summary_stats,
 )

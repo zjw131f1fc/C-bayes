@@ -13,6 +13,7 @@ from problem1_src.visualize import (
     plot_decision_gap,
     generate_consistency_table,
     find_controversial_and_certain_celebs,
+    get_celebs_by_variance,
     print_summary_stats,
 )
 
@@ -50,18 +51,14 @@ def main():
     # 图表一：后验估计轨迹图
     print("\n[5] 生成后验估计轨迹图...")
 
-    # 找到争议选手和高确定性选手
-    controversial, certain = find_controversial_and_certain_celebs(datas)
+    # 获取不同方差级别的选手（高、中、低各3个）
+    celebs_to_plot = get_celebs_by_variance(datas, n_per_group=3)
 
-    if controversial:
-        c_id, c_var = controversial
-        print(f"  争议选手 (高不确定性): celeb_id={c_id}, avg_var={c_var:.6f}")
-        plot_posterior_trajectory(datas, f"Controversial_Celeb_{c_id}", c_id, OUTPUT_DIR)
-
-    if certain:
-        c_id, c_var = certain
-        print(f"  高确定性选手: celeb_id={c_id}, avg_var={c_var:.6f}")
-        plot_posterior_trajectory(datas, f"Certain_Celeb_{c_id}", c_id, OUTPUT_DIR)
+    print(f"  将绘制 {len(celebs_to_plot)} 位选手的后验轨迹图:")
+    for cid, var, group in celebs_to_plot:
+        group_cn = {'high': '高不确定性', 'medium': '中等', 'low': '低不确定性'}[group]
+        print(f"    - celeb_id={cid}, var={var:.6f} ({group_cn})")
+        plot_posterior_trajectory(datas, f"{group}_celeb_{cid}", cid, OUTPUT_DIR)
 
     print("\n" + "=" * 60)
     print(f"所有输出保存到: {OUTPUT_DIR}/")

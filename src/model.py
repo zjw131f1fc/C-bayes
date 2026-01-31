@@ -37,6 +37,7 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
 
     # 规则和分数
     rule_method = np.zeros(n_weeks, dtype=np.int32)
+    judge_save_active = np.zeros(n_weeks, dtype=bool)  # 评委拯救是否激活
     judge_pct_padded = np.zeros((n_weeks, max_contestants), dtype=np.float32)
     judge_rank_padded = np.zeros((n_weeks, max_contestants), dtype=np.float32)
 
@@ -50,6 +51,7 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
         week_indices[w, :n_cont] = indices
         week_mask[w, :n_cont] = True
         rule_method[w] = wd['rule_method']
+        judge_save_active[w] = wd.get('judge_save_active', False)
         judge_pct_padded[w, :n_cont] = judge_score_pct[indices]
         judge_rank_padded[w, :n_cont] = judge_rank_score[indices]
 
@@ -76,6 +78,7 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
         'n_elim_per_week': n_elim_per_week,
         'has_elim': has_elim,
         'rule_method': rule_method,
+        'judge_save_active': judge_save_active,
         'judge_pct_padded': judge_pct_padded,
         'judge_rank_padded': judge_rank_padded,
         'obs_to_week': obs_to_week,
@@ -87,7 +90,7 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
     }
 
 
-def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb_spline_bases=None):
+def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb_spline_bases=None, linear_feature_names=None):
     """NumPyro 模型定义 (完全向量化版本)"""
     n_celebs = train_data['n_celebs']
     n_pros = train_data['n_pros']
@@ -127,8 +130,6 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
     alpha = numpyro.deterministic('alpha', alpha_raw - jnp.mean(alpha_raw))
 
     # 舞者效应 δ
-    delta_beta = numpyro.sample('delta_beta',
-        dist.Normal(0, prior['beta_pro_scale']).expand([train_data['X_pro'].shape[1]]))
     delta_sigma = numpyro.sample('delta_sigma',
         dist.InverseGamma(prior['sigma_pro']['a'], prior['sigma_pro']['b']))
 
@@ -146,12 +147,26 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
     else:
         delta_eps = numpyro.sample('delta_eps', dist.Normal(0, 1).expand([n_pros]))
 
-    delta_raw = jnp.dot(train_data['X_pro'], delta_beta) + delta_sigma * delta_eps
+    # 舞者特征线性部分（可选）
+    if model_cfg.get('use_pro_features', True) and train_data['X_pro'].shape[1] > 0:
+        delta_beta = numpyro.sample('delta_beta',
+            dist.Normal(0, prior['beta_pro_scale']).expand([train_data['X_pro'].shape[1]]))
+        delta_raw = jnp.dot(train_data['X_pro'], delta_beta) + delta_sigma * delta_eps
+    else:
+        delta_raw = delta_sigma * delta_eps
+
     delta = numpyro.deterministic('delta', delta_raw - jnp.mean(delta_raw))
 
     # 线性特征贡献
     if X_lin is not None and X_lin.shape[1] > 0:
         n_features = X_lin.shape[1]
+
+        # 识别需要正向先验的特征
+        positive_prior_features = model_cfg.get('positive_prior_features') or []
+        positive_mask = jnp.array([
+            name in positive_prior_features
+            for name in (linear_feature_names or [])
+        ])
 
         if model_cfg.get('use_horseshoe', False):
             # Regularized Horseshoe 先验（非中心化参数化）
@@ -174,11 +189,27 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
             scale = tau_hs * jnp.sqrt(lambda_tilde2)
 
             # 非中心化参数化：beta = scale * beta_raw
+            # 正向先验特征用 HalfNormal，其他用 Normal
             beta_raw = numpyro.sample('beta_raw', dist.Normal(0, 1).expand([n_features]))
-            beta_obs = numpyro.deterministic('beta_obs', scale * beta_raw)
+            beta_obs_raw = scale * beta_raw
+            # 对正向先验特征取绝对值
+            beta_obs = numpyro.deterministic('beta_obs',
+                jnp.where(positive_mask, jnp.abs(beta_obs_raw), beta_obs_raw))
         else:
-            beta_obs = numpyro.sample('beta_obs',
-                dist.Normal(0, prior['beta_obs_scale']).expand([n_features]))
+            # 分别采样正向和普通特征
+            beta_list = []
+            for i in range(n_features):
+                name = linear_feature_names[i] if linear_feature_names else f'feat_{i}'
+                if name in positive_prior_features:
+                    # 正向先验：HalfNormal
+                    beta_i = numpyro.sample(f'beta_obs_{i}',
+                        dist.HalfNormal(prior['beta_obs_scale']))
+                else:
+                    # 普通先验：Normal
+                    beta_i = numpyro.sample(f'beta_obs_{i}',
+                        dist.Normal(0, prior['beta_obs_scale']))
+                beta_list.append(beta_i)
+            beta_obs = numpyro.deterministic('beta_obs', jnp.stack(beta_list))
 
         lin_contrib = jnp.dot(X_lin, beta_obs)
     else:
@@ -219,7 +250,7 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
 
     numpyro.deterministic('mu', mu)
 
-    # === 向量化: 按周分组 softmax 计算 P_fan ===
+    # === 向量化: 按周分组线性归一化计算 P_fan ===
     week_indices = vec_week['week_indices']  # [n_weeks, max_contestants]
     week_mask = vec_week['week_mask']        # [n_weeks, max_contestants]
     obs_to_week = vec_week['obs_to_week']    # [n_obs]
@@ -228,8 +259,13 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
     # 用0填充无效索引，取mu值后用mask处理
     safe_indices = jnp.where(week_indices >= 0, week_indices, 0)
     mu_padded = mu[safe_indices]  # [n_weeks, max_contestants]
-    mu_masked = jnp.where(week_mask, mu_padded, -jnp.inf)
-    P_fan_padded = jax.nn.softmax(mu_masked, axis=1)  # [n_weeks, max_contestants]
+
+    # 线性归一化: P_fan = (mu - min) / sum(mu - min)
+    mu_masked = jnp.where(week_mask, mu_padded, jnp.inf)  # 无效位置设为inf，不影响min
+    mu_min = jnp.min(mu_masked, axis=1, keepdims=True)  # [n_weeks, 1]
+    mu_shifted = jnp.where(week_mask, mu_padded - mu_min, 0.0)  # 平移到非负
+    mu_sum = jnp.sum(mu_shifted, axis=1, keepdims=True) + 1e-10  # 防止除零
+    P_fan_padded = mu_shifted / mu_sum  # [n_weeks, max_contestants]
     P_fan_padded = jnp.where(week_mask, P_fan_padded, 0.0)
 
     # 向量化散射: 使用预计算的反向映射
@@ -266,23 +302,67 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
     else:
         tau = model_cfg['tau_init']
 
-    # === 完全向量化: Plackett-Luce 似然 ===
+    # === 评委拯救修正参数 θ_save ===
+    # θ_save > 0 表示评委倾向于保留技术分更高的选手
+    if model_cfg.get('use_judge_save_correction', True):
+        theta_save = numpyro.sample('theta_save', dist.HalfNormal(model_cfg.get('theta_save_scale', 1.0)))
+    else:
+        theta_save = 0.0
+
+    # === 完全向量化: Plackett-Luce 似然（含评委拯救修正） ===
     elim_local = vec_week['elim_local']      # [n_weeks, max_elim]
     elim_mask = vec_week['elim_mask']        # [n_weeks, max_elim]
     has_elim = vec_week['has_elim']          # [n_weeks]
+    judge_save = vec_week['judge_save_active']  # [n_weeks]
     max_elim = vec_week['max_elim']
 
-    # 计算 neg_tau_S
-    neg_tau_S_padded = -tau * S_padded  # [n_weeks, max_contestants]
+    # 获取评委分（用于 judge_save 修正）
+    # 使用百分比法的评委分作为技术分指标
+    judge_score_padded = vec_week['judge_pct_padded']  # [n_weeks, max_contestants]
 
-    def pl_single_week(neg_tau_S_w, valid_contestants, elim_w, elim_valid_w):
-        """单周的Plackett-Luce对数似然 (用于vmap)"""
+    def pl_single_week_with_save(neg_tau_S_w, S_w, judge_w, valid_contestants, elim_w, elim_valid_w, is_judge_save):
+        """单周的Plackett-Luce对数似然（含评委拯救修正）"""
+
+        # === 评委拯救修正 ===
+        # 当 judge_save 激活时：
+        # 1. 找出 S 最低的两人（危险区）
+        # 2. 对危险区两人的 S 做修正：S' = S + θ_save * (J - J_mean_bottom2)
+        # 3. 似然只对危险区两人做 Plackett-Luce
+
+        # 找出 S 最低的两人（用大值填充无效位置）
+        S_for_sort = jnp.where(valid_contestants, S_w, jnp.inf)
+        # 获取最小的两个索引
+        bottom2_idx = jnp.argsort(S_for_sort)[:2]
+
+        # 计算危险区两人的评委分均值
+        judge_bottom2 = judge_w[bottom2_idx]
+        judge_mean_bottom2 = jnp.mean(judge_bottom2)
+
+        # 修正后的 S（只对危险区两人修正）
+        # S' = S + θ_save * (J - J_mean_bottom2)
+        judge_diff = judge_w - judge_mean_bottom2
+        S_corrected = S_w + theta_save * judge_diff
+
+        # 构建危险区 mask（只有 bottom2 的两人）
+        bottom2_mask = jnp.zeros_like(valid_contestants)
+        bottom2_mask = bottom2_mask.at[bottom2_idx[0]].set(True)
+        bottom2_mask = bottom2_mask.at[bottom2_idx[1]].set(True)
+        bottom2_mask = bottom2_mask & valid_contestants  # 确保是有效选手
+
+        # 根据是否 judge_save 选择使用的 S 和 mask
+        S_final = jnp.where(is_judge_save, S_corrected, S_w)
+        contestants_final = jnp.where(is_judge_save, bottom2_mask, valid_contestants)
+
+        # 计算 neg_tau_S
+        neg_tau_S_final = -tau * S_final
+
+        # Plackett-Luce 似然
         def scan_fn(remaining, i):
             e_idx = elim_w[i]
             is_valid = elim_valid_w[i]
             log_remaining = jnp.log(remaining + 1e-10)
-            log_denom = jax.scipy.special.logsumexp(neg_tau_S_w + log_remaining)
-            ll = neg_tau_S_w[e_idx] - log_denom
+            log_denom = jax.scipy.special.logsumexp(neg_tau_S_final + log_remaining)
+            ll = neg_tau_S_final[e_idx] - log_denom
             ll = jnp.where(is_valid, ll, 0.0)
             new_remaining = jnp.where(
                 is_valid,
@@ -291,16 +371,22 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
             )
             return new_remaining, ll
 
-        init_remaining = valid_contestants.astype(jnp.float32)
+        init_remaining = contestants_final.astype(jnp.float32)
         _, lls = jax.lax.scan(scan_fn, init_remaining, jnp.arange(max_elim))
         return lls.sum()
 
+    # 计算 neg_tau_S（用于非 judge_save 周）
+    neg_tau_S_padded = -tau * S_padded  # [n_weeks, max_contestants]
+
     # 使用 vmap 并行计算所有周的似然
-    all_week_lls = jax.vmap(pl_single_week)(
-        neg_tau_S_padded,  # [n_weeks, max_contestants]
-        week_mask,         # [n_weeks, max_contestants]
-        elim_local,        # [n_weeks, max_elim]
-        elim_mask          # [n_weeks, max_elim]
+    all_week_lls = jax.vmap(pl_single_week_with_save)(
+        neg_tau_S_padded,      # [n_weeks, max_contestants]
+        S_padded,              # [n_weeks, max_contestants]
+        judge_score_padded,    # [n_weeks, max_contestants]
+        week_mask,             # [n_weeks, max_contestants]
+        elim_local,            # [n_weeks, max_elim]
+        elim_mask,             # [n_weeks, max_elim]
+        judge_save             # [n_weeks]
     )
 
     # 只对有淘汰的周求和
@@ -416,11 +502,19 @@ def build_model(config, datas):
     linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
 
     X_lin = X_obs[:, linear_cols] if linear_cols else None
+    linear_feature_names = [X_obs_names[c] for c in linear_cols]
     spline_bases = [_build_spline_basis(X_obs[:, c], model_cfg['n_spline_knots'],
                                         model_cfg['spline_degree']) for c in spline_cols]
     spline_feature_names = [X_obs_names[c] for c in spline_cols]
     if spline_features:
         print(f"  [build_model] Obs spline features: {spline_feature_names}")
+
+    # 打印正向先验特征
+    positive_prior_features = model_cfg.get('positive_prior_features') or []
+    if positive_prior_features:
+        active_positive = [f for f in positive_prior_features if f in linear_feature_names]
+        if active_positive:
+            print(f"  [build_model] Positive prior features: {active_positive}")
 
     # === 处理名人级样条特征 ===
     celeb_spline_features = model_cfg.get('celeb_spline_features') or []
@@ -459,6 +553,7 @@ def build_model(config, datas):
         'prior': config['prior'],
         'model_cfg': model_cfg,
         'X_lin': X_lin,
+        'linear_feature_names': linear_feature_names,
         'spline_bases': spline_bases,
         'spline_feature_names': spline_feature_names,
         'celeb_spline_bases': celeb_spline_bases if celeb_spline_bases else None,
@@ -496,7 +591,8 @@ def train(config, model_params, datas):
              X_lin=model_params['X_lin'],
              spline_bases=model_params['spline_bases'],
              vec_week=model_params['vec_week'],
-             celeb_spline_bases=model_params.get('celeb_spline_bases'))
+             celeb_spline_bases=model_params.get('celeb_spline_bases'),
+             linear_feature_names=model_params.get('linear_feature_names'))
 
     print("    [train] MCMC completed")
     datas['mcmc'] = mcmc
@@ -732,10 +828,13 @@ def generate_output(config, datas):
 
     mu = alpha_contrib + delta_contrib + linear_contrib + spline_contrib
 
+    # 线性归一化计算 P_fan
     P_fan = np.zeros(n_obs, dtype=np.float32)
     for wd in td['week_data']:
         mask = wd['obs_mask']
-        P_fan[mask] = softmax(mu[mask])
+        mu_week = mu[mask]
+        mu_shifted = mu_week - mu_week.min()
+        P_fan[mask] = mu_shifted / (mu_shifted.sum() + 1e-10)
 
     output = {
         'n_obs': n_obs,
@@ -835,11 +934,13 @@ def predict(config, train_datas, eval_datas):
             if key in posterior:
                 mu = mu + basis @ posterior[key][s]
 
-        # P_fan = softmax(mu) per week
+        # 线性归一化计算 P_fan
         P_fan = np.zeros(n_obs, dtype=np.float32)
         for wd in td['week_data']:
             mask = wd['obs_mask']
-            P_fan[mask] = softmax(mu[mask])
+            mu_week = mu[mask]
+            mu_shifted = mu_week - mu_week.min()
+            P_fan[mask] = mu_shifted / (mu_shifted.sum() + 1e-10)
 
         P_fan_samples[s] = P_fan
 
