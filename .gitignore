@@ -35,6 +35,7 @@ Thumbs.db
 
 # Temporary scripts
 check_*.py
+predict_*.py
 
 # Reference materials
 *.pdf
@@ -44,6 +45,8 @@ check_*.py
 映射.md
 第二问细化.md
 TODO.md
+0201分析.md
+第一问.md
 
 # Temporary output files
 output.txt
