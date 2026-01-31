@@ -678,33 +678,33 @@ def compute_metrics(config, datas):
         elim_global = np.where(wd['eliminated_mask'])[0]
         actual_elim = set(np.searchsorted(indices, elim_global))
 
-        # 1. 按后验样本计算准确率 (Acc_B)
-        correct_count = 0
+        # 1. 按后验样本计算准确率 (Acc_B) - 按淘汰次数计算
+        correct_elim_count = 0  # 正确预测的淘汰次数（所有样本累计）
+        total_elim_count = k * n_samples  # 总淘汰次数 = k * n_samples
         for s in range(n_samples):
             S_week = S_samples[s, mask]
 
             if wd['judge_save_active']:
                 pred_danger = set(np.argsort(S_week)[:2])
-                correct = actual_elim.issubset(pred_danger)
+                # 每个实际淘汰者是否在危险区内
+                correct_elim_count += len(actual_elim & pred_danger)
             else:
                 pred_elim = set(np.argsort(S_week)[:k])
-                correct = pred_elim == actual_elim
+                # 每个实际淘汰者是否被正确预测
+                correct_elim_count += len(actual_elim & pred_elim)
 
-            if correct:
-                correct_count += 1
+        accuracy = correct_elim_count / total_elim_count  # 淘汰预测准确率
 
-        accuracy = correct_count / n_samples  # p_i
-
-        # 2. 按后验均值计算准确率 (Acc_A)
+        # 2. 按后验均值计算准确率 (Acc_A) - 按淘汰次数计算
         S_week_mean = S_mean[mask]
         if wd['judge_save_active']:
             pred_danger_mean = set(np.argsort(S_week_mean)[:2])
-            correct_mean = actual_elim.issubset(pred_danger_mean)
+            correct_elim_mean = len(actual_elim & pred_danger_mean)
         else:
             pred_elim_mean = set(np.argsort(S_week_mean)[:k])
-            correct_mean = pred_elim_mean == actual_elim
+            correct_elim_mean = len(actual_elim & pred_elim_mean)
 
-        accuracy_mean = 1.0 if correct_mean else 0.0  # f(S̄)
+        accuracy_mean = correct_elim_mean / k  # 淘汰预测准确率（点估计）
 
         # 3. 决策缺口 δ_i = |f(S̄) - p_i|
         decision_gap = abs(accuracy_mean - accuracy)
@@ -716,8 +716,8 @@ def compute_metrics(config, datas):
             p_fan_var = float(np.mean(np.var(P_fan_week, axis=0)))
 
         week_results.append({
-            'accuracy': accuracy,           # p_i (Acc_B per week)
-            'accuracy_mean': accuracy_mean, # f(S̄) (Acc_A per week)
+            'accuracy': accuracy,           # p_i (Acc_B per week, 按淘汰次数)
+            'accuracy_mean': accuracy_mean, # f(S̄) (Acc_A per week, 按淘汰次数)
             'decision_gap': decision_gap,   # δ_i
             'p_fan_var': p_fan_var,         # 后验样本方差
             'season': season,
@@ -726,27 +726,35 @@ def compute_metrics(config, datas):
             'judge_save': wd['judge_save_active'],
             'n_contestants': int(mask.sum()),
             'n_eliminated': k,
+            'correct_elim_mean': correct_elim_mean,  # 点估计正确淘汰数
         })
 
     valid_results = [r for r in week_results if r['accuracy'] is not None]
-    valid_acc = [r['accuracy'] for r in valid_results]
-    valid_acc_mean = [r['accuracy_mean'] for r in valid_results]
     valid_gap = [r['decision_gap'] for r in valid_results]
     valid_var = [r['p_fan_var'] for r in valid_results if r['p_fan_var'] is not None]
 
+    # 按淘汰次数加权计算全局准确率
+    total_elim = sum(r['n_eliminated'] for r in valid_results)
+    total_correct_mean = sum(r['correct_elim_mean'] for r in valid_results)
+    # Acc_B: 按淘汰次数加权平均
+    weighted_acc_b = sum(r['accuracy'] * r['n_eliminated'] for r in valid_results) / total_elim if total_elim > 0 else 0.0
+    # Acc_A: 总正确淘汰数 / 总淘汰数
+    weighted_acc_a = total_correct_mean / total_elim if total_elim > 0 else 0.0
+
     datas['metrics'] = {
         'week_results': week_results,
-        'mean_accuracy': np.mean(valid_acc) if valid_acc else 0.0,              # 全局 Acc_B
-        'mean_accuracy_expectation': np.mean(valid_acc_mean) if valid_acc_mean else 0.0,  # 全局 Acc_A
-        'mean_decision_gap': np.mean(valid_gap) if valid_gap else 0.0,          # 全局平均决策风险
-        'mean_p_fan_var': np.mean(valid_var) if valid_var else 0.0,             # 全局平均后验方差
-        'n_weeks_evaluated': len(valid_acc),
+        'mean_accuracy': weighted_acc_b,              # 全局 Acc_B (按淘汰次数加权)
+        'mean_accuracy_expectation': weighted_acc_a,  # 全局 Acc_A (按淘汰次数加权)
+        'mean_decision_gap': np.mean(valid_gap) if valid_gap else 0.0,
+        'mean_p_fan_var': np.mean(valid_var) if valid_var else 0.0,
+        'n_weeks_evaluated': len(valid_results),
+        'n_eliminations': total_elim,  # 总淘汰次数
     }
 
-    print(f"Mean accuracy (Acc_B, posterior samples): {datas['metrics']['mean_accuracy']:.3f} ({len(valid_acc)} weeks)")
-    print(f"Mean accuracy (Acc_A, expectation):       {datas['metrics']['mean_accuracy_expectation']:.3f}")
-    print(f"Mean decision gap (|Acc_A - Acc_B|):      {datas['metrics']['mean_decision_gap']:.3f}")
-    print(f"Mean P_fan variance:                      {datas['metrics']['mean_p_fan_var']:.6f}")
+    print(f"Elimination accuracy (Acc_B, posterior): {datas['metrics']['mean_accuracy']:.3f} ({total_elim} eliminations)")
+    print(f"Elimination accuracy (Acc_A, point est): {datas['metrics']['mean_accuracy_expectation']:.3f}")
+    print(f"Mean decision gap (|Acc_A - Acc_B|):     {datas['metrics']['mean_decision_gap']:.3f}")
+    print(f"Mean P_fan variance:                     {datas['metrics']['mean_p_fan_var']:.6f}")
     return datas
 
 
