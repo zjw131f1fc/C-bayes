@@ -111,6 +111,167 @@ def plot_posterior_trajectory(datas, celeb_name, celeb_id, output_dir):
     print(f"  Saved: {output_dir}/fig1_trajectory_{celeb_name}.png")
 
 
+def plot_score_trajectory_with_threshold(datas, celeb_name, celeb_id, output_dir, target_season=None):
+    """
+    后验得分轨迹图（带淘汰临界线）
+    展示某位选手某个赛季的综合得分 S 及其与淘汰临界线的关系
+
+    参数:
+        datas: 包含 S_samples, train_data 的数据字典
+        celeb_name: 选手名称（用于标题）
+        celeb_id: 选手在 celeb_idx 中的 ID
+        output_dir: 输出目录
+        target_season: 指定赛季（None 则自动选择被淘汰的赛季）
+    """
+    setup_plot_style()
+
+    S_samples = datas['S_samples']  # [n_samples, n_obs]
+    td = datas['train_data']
+    celeb_idx = td['celeb_idx']
+    week_data = td['week_data']
+    n_samples = S_samples.shape[0]
+
+    # 找到该选手的所有观测点
+    celeb_mask = celeb_idx == celeb_id
+    celeb_obs_indices = np.where(celeb_mask)[0]
+
+    if len(celeb_obs_indices) == 0:
+        print(f"  Warning: No observations found for celeb_id={celeb_id}")
+        return
+
+    # 按赛季分组观测点
+    season_obs = {}  # season -> list of (obs_idx, week, eliminated)
+    for obs_idx in celeb_obs_indices:
+        for wd in week_data:
+            if wd['obs_mask'][obs_idx]:
+                season = wd['season']
+                if season not in season_obs:
+                    season_obs[season] = []
+                season_obs[season].append({
+                    'obs_idx': obs_idx,
+                    'week': wd['week'],
+                    'eliminated': wd['eliminated_mask'][obs_idx],
+                    'week_data': wd,
+                })
+                break
+
+    # 选择目标赛季
+    if target_season is None:
+        # 自动选择被淘汰的赛季
+        for season, obs_list in season_obs.items():
+            if any(o['eliminated'] for o in obs_list):
+                target_season = season
+                break
+        if target_season is None:
+            target_season = list(season_obs.keys())[0]
+
+    if target_season not in season_obs:
+        print(f"  Warning: Season {target_season} not found for celeb_id={celeb_id}")
+        return
+
+    obs_list = season_obs[target_season]
+
+    # 收集该赛季的数据
+    weeks = []
+    s_means = []
+    s_lower = []
+    s_upper = []
+    threshold_means = []
+    threshold_lower = []
+    threshold_upper = []
+    eliminated_week = None
+
+    for obs_info in obs_list:
+        obs_idx = obs_info['obs_idx']
+        week_num = obs_info['week']
+        wd = obs_info['week_data']
+        n_elim = wd['n_eliminated']
+
+        weeks.append(week_num)
+
+        # 该观测点的 S 后验分布
+        s_obs = S_samples[:, obs_idx]
+        s_means.append(np.mean(s_obs))
+        s_lower.append(np.percentile(s_obs, 2.5))
+        s_upper.append(np.percentile(s_obs, 97.5))
+
+        # 计算该周的淘汰临界线
+        week_mask = wd['obs_mask']
+        week_indices = np.where(week_mask)[0]
+        n_contestants = len(week_indices)
+
+        if n_elim > 0 and n_contestants > n_elim:
+            thresholds = []
+            for s in range(n_samples):
+                S_week = S_samples[s, week_mask]
+                sorted_scores = np.sort(S_week)
+                threshold = sorted_scores[n_elim]
+                thresholds.append(threshold)
+
+            thresholds = np.array(thresholds)
+            threshold_means.append(np.mean(thresholds))
+            threshold_lower.append(np.percentile(thresholds, 2.5))
+            threshold_upper.append(np.percentile(thresholds, 97.5))
+        else:
+            threshold_means.append(np.nan)
+            threshold_lower.append(np.nan)
+            threshold_upper.append(np.nan)
+
+        if obs_info['eliminated']:
+            eliminated_week = week_num
+
+    # 排序
+    sort_idx = np.argsort(weeks)
+    weeks = np.array(weeks)[sort_idx]
+    s_means = np.array(s_means)[sort_idx]
+    s_lower = np.array(s_lower)[sort_idx]
+    s_upper = np.array(s_upper)[sort_idx]
+    threshold_means = np.array(threshold_means)[sort_idx]
+    threshold_lower = np.array(threshold_lower)[sort_idx]
+    threshold_upper = np.array(threshold_upper)[sort_idx]
+
+    # 绘图
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # 选手得分的阴影区域（95% CI）
+    ax.fill_between(weeks, s_lower, s_upper, alpha=0.3, color='steelblue',
+                    label='Score 95% CI')
+
+    # 选手得分中心线（均值）
+    ax.plot(weeks, s_means, 'o-', color='steelblue', linewidth=2, markersize=8,
+            label='Score (Posterior Mean)')
+
+    # 淘汰临界线（带置信区间）
+    valid_threshold = ~np.isnan(threshold_means)
+    if valid_threshold.any():
+        ax.fill_between(weeks[valid_threshold],
+                        threshold_lower[valid_threshold],
+                        threshold_upper[valid_threshold],
+                        alpha=0.2, color='red', label='Threshold 95% CI')
+        ax.plot(weeks[valid_threshold], threshold_means[valid_threshold],
+                's--', color='red', linewidth=1.5, markersize=6,
+                label='Elimination Threshold')
+
+    # 淘汰标记
+    if eliminated_week is not None:
+        elim_idx = np.where(weeks == eliminated_week)[0][0]
+        ax.scatter([eliminated_week], [s_means[elim_idx]], marker='X', s=200,
+                   color='darkred', zorder=5, label='Eliminated')
+
+    ax.set_xlabel('Week', fontsize=12)
+    ax.set_ylabel('Combined Score (S = Judge + Fan)', fontsize=12)
+    ax.set_title(f'Posterior Score Trajectory with Elimination Threshold\n{celeb_name} (Season {target_season})',
+                 fontsize=13)
+    ax.legend(loc='best', fontsize=9)
+    ax.set_xticks(weeks)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/fig_score_trajectory_{celeb_name}.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {output_dir}/fig_score_trajectory_{celeb_name}.png")
+
+
 def plot_decision_gap(datas, output_dir):
     """
     图表二：决策缺口散点图
@@ -299,6 +460,48 @@ def find_controversial_and_certain_celebs(datas):
            (certain_id, celeb_variances[certain_id])
 
 
+def get_eliminated_celebs(datas, n_celebs=10):
+    """
+    获取被淘汰的选手列表
+
+    返回:
+        list of (celeb_id, eliminated_week, n_weeks_participated)
+    """
+    td = datas['train_data']
+    celeb_idx = td['celeb_idx']
+    week_data = td['week_data']
+    n_total_celebs = td['n_celebs']
+
+    eliminated_celebs = []
+
+    for c in range(n_total_celebs):
+        celeb_mask = celeb_idx == c
+        celeb_obs_indices = np.where(celeb_mask)[0]
+
+        if len(celeb_obs_indices) == 0:
+            continue
+
+        # 检查该选手是否被淘汰
+        eliminated_week = None
+        weeks_participated = []
+
+        for obs_idx in celeb_obs_indices:
+            for wd in week_data:
+                if wd['obs_mask'][obs_idx]:
+                    weeks_participated.append(wd['week'])
+                    if wd['eliminated_mask'][obs_idx]:
+                        eliminated_week = wd['week']
+                    break
+
+        if eliminated_week is not None and len(weeks_participated) >= 3:
+            eliminated_celebs.append((c, eliminated_week, len(weeks_participated)))
+
+    # 按参与周数排序（优先选择参与周数多的）
+    eliminated_celebs.sort(key=lambda x: -x[2])
+
+    return eliminated_celebs[:n_celebs]
+
+
 def get_celebs_by_variance(datas, n_per_group=3):
     """
     按方差分组获取选手：高、中、低方差各 n_per_group 个
@@ -380,3 +583,130 @@ def print_summary_stats(datas):
 
     print(f"\n评估周数: {metrics['n_weeks_evaluated']}")
     print("=" * 60)
+
+
+def plot_posterior_std_bar(datas, output_dir, feature_names=None):
+    """
+    图表四：后验标准差柱状图
+    展示各参数的后验标准差，衡量模型确定性
+
+    参数:
+        datas: 包含 posterior_samples 的数据字典
+        output_dir: 输出目录
+        feature_names: 线性特征名称列表（可选）
+    """
+    setup_plot_style()
+
+    posterior = datas['posterior_samples']
+
+    # 收集各参数的后验标准差
+    param_names = []
+    param_stds = []
+    param_colors = []
+
+    # 1. 线性特征系数 beta_obs
+    if 'beta_obs' in posterior:
+        beta_obs = posterior['beta_obs']  # [n_samples, n_features]
+        n_features = beta_obs.shape[1]
+
+        # 获取特征名称
+        if feature_names is None:
+            feature_names = datas.get('X_obs_names_filtered', [f'feat_{i}' for i in range(n_features)])
+
+        for i in range(n_features):
+            name = feature_names[i] if i < len(feature_names) else f'feat_{i}'
+            std = np.std(beta_obs[:, i])
+            param_names.append(name)
+            param_stds.append(std)
+            param_colors.append('steelblue')
+
+    # 2. 名人效应 alpha（取平均标准差）
+    if 'alpha' in posterior:
+        alpha = posterior['alpha']  # [n_samples, n_celebs]
+        alpha_std_mean = np.mean(np.std(alpha, axis=0))
+        param_names.append('α (celeb effect)')
+        param_stds.append(alpha_std_mean)
+        param_colors.append('coral')
+
+    # 3. 舞者效应 delta（取平均标准差）
+    if 'delta' in posterior:
+        delta = posterior['delta']  # [n_samples, n_pros]
+        delta_std_mean = np.mean(np.std(delta, axis=0))
+        param_names.append('δ (pro effect)')
+        param_stds.append(delta_std_mean)
+        param_colors.append('coral')
+
+    # 4. 温度参数 tau
+    if 'tau' in posterior:
+        tau = posterior['tau']
+        param_names.append('τ (temperature)')
+        param_stds.append(np.std(tau))
+        param_colors.append('green')
+
+    # 5. 评委拯救参数 theta_save
+    if 'theta_save' in posterior:
+        theta_save = posterior['theta_save']
+        param_names.append('θ_save (judge save)')
+        param_stds.append(np.std(theta_save))
+        param_colors.append('green')
+
+    # 6. Horseshoe 参数
+    if 'tau_hs' in posterior:
+        param_names.append('τ_hs (global shrink)')
+        param_stds.append(np.std(posterior['tau_hs']))
+        param_colors.append('purple')
+
+    if 'c2_hs' in posterior:
+        param_names.append('c²_hs (slab var)')
+        param_stds.append(np.std(posterior['c2_hs']))
+        param_colors.append('purple')
+
+    # 按标准差排序
+    sorted_idx = np.argsort(param_stds)[::-1]  # 降序
+    param_names = [param_names[i] for i in sorted_idx]
+    param_stds = [param_stds[i] for i in sorted_idx]
+    param_colors = [param_colors[i] for i in sorted_idx]
+
+    # 绘图
+    fig, ax = plt.subplots(figsize=(12, max(6, len(param_names) * 0.3)))
+
+    y_pos = np.arange(len(param_names))
+    bars = ax.barh(y_pos, param_stds, color=param_colors, alpha=0.7, edgecolor='black')
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(param_names, fontsize=9)
+    ax.invert_yaxis()  # 最大的在上面
+    ax.set_xlabel('Posterior Standard Deviation', fontsize=12)
+    ax.set_title('Figure 4: Parameter Uncertainty (Posterior Std)', fontsize=14)
+    ax.grid(True, alpha=0.3, axis='x')
+
+    # 添加数值标签
+    for i, (bar, std) in enumerate(zip(bars, param_stds)):
+        ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2,
+                f'{std:.3f}', va='center', fontsize=8)
+
+    # 添加图例
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='steelblue', alpha=0.7, label='Linear Features (β)'),
+        Patch(facecolor='coral', alpha=0.7, label='Random Effects (α, δ)'),
+        Patch(facecolor='green', alpha=0.7, label='Likelihood Params (τ, θ)'),
+        Patch(facecolor='purple', alpha=0.7, label='Horseshoe Params'),
+    ]
+    ax.legend(handles=legend_elements, loc='lower right', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/fig4_posterior_std.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {output_dir}/fig4_posterior_std.png")
+
+    # 同时输出文本表格
+    with open(f'{output_dir}/table_posterior_std.txt', 'w') as f:
+        f.write("Table: Parameter Posterior Standard Deviations\n")
+        f.write("=" * 60 + "\n")
+        f.write(f"{'Parameter':<35} {'Std':<15}\n")
+        f.write("-" * 60 + "\n")
+        for name, std in zip(param_names, param_stds):
+            f.write(f"{name:<35} {std:<15.4f}\n")
+        f.write("=" * 60 + "\n")
+    print(f"  Saved: {output_dir}/table_posterior_std.txt")

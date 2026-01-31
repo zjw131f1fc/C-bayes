@@ -227,6 +227,52 @@ def load_mock_data(config, datas):
     return datas
 
 
+def normalize_judge_score_weekly(datas):
+    """
+    对评委分进行周内 z-score 标准化
+
+    原始数据中的 judge_score_season_zscore 是在赛季层面标准化的，
+    但应该在每周层面标准化，以消除不同周之间评委打分标准的差异。
+
+    此函数会替换 X_obs 中的 judge_score_season_zscore 列。
+    """
+    td = datas['train_data']
+
+    # 检查是否存在 judge_score_season_zscore
+    if 'judge_score_season_zscore' not in td['X_obs_names']:
+        print("  [normalize_judge_score_weekly] judge_score_season_zscore not found, skipping")
+        return datas
+
+    # 找到列索引
+    col_idx = td['X_obs_names'].index('judge_score_season_zscore')
+
+    # 创建新的周内标准化分数
+    judge_score_week_zscore = np.zeros(td['n_obs'], dtype=np.float32)
+
+    for wd in td['week_data']:
+        mask = wd['obs_mask']
+        week_scores = td['judge_score_pct'][mask]
+
+        # 周内标准化
+        mean = week_scores.mean()
+        std = week_scores.std()
+
+        if std > 1e-6:  # 避免除零
+            judge_score_week_zscore[mask] = (week_scores - mean) / std
+        else:
+            judge_score_week_zscore[mask] = 0.0
+
+    # 替换 X_obs 中的列
+    td['X_obs'][:, col_idx] = judge_score_week_zscore
+
+    # 验证
+    overall_mean = judge_score_week_zscore.mean()
+    overall_std = judge_score_week_zscore.std()
+    print(f"  [normalize_judge_score_weekly] Done. Overall: mean={overall_mean:.6f}, std={overall_std:.3f}")
+
+    return datas
+
+
 def filter_data(datas, test_season):
     """
     按赛季划分数据

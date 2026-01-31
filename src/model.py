@@ -319,60 +319,28 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
     else:
         theta_save = 0.0
 
-    # === 完全向量化: Plackett-Luce 似然（含评委拯救修正） ===
+    # === 分组向量化: Plackett-Luce 似然（优化：分离有/无评委拯救的周） ===
     elim_local = vec_week['elim_local']      # [n_weeks, max_elim]
     elim_mask = vec_week['elim_mask']        # [n_weeks, max_elim]
     has_elim = vec_week['has_elim']          # [n_weeks]
-    judge_save = vec_week['judge_save_active']  # [n_weeks]
+    judge_save_active = vec_week['judge_save_active']  # [n_weeks]
     max_elim = vec_week['max_elim']
 
     # 获取评委分（用于 judge_save 修正）
-    # 使用百分比法的评委分作为技术分指标
     judge_score_padded = vec_week['judge_pct_padded']  # [n_weeks, max_contestants]
 
-    def pl_single_week_with_save(neg_tau_S_w, S_w, judge_w, valid_contestants, elim_w, elim_valid_w, is_judge_save):
-        """单周的Plackett-Luce对数似然（含评委拯救修正）"""
+    # 计算 neg_tau_S
+    neg_tau_S_padded = -tau * S_padded  # [n_weeks, max_contestants]
 
-        # === 评委拯救修正 ===
-        # 当 judge_save 激活时：
-        # 1. 找出 S 最低的两人（危险区）
-        # 2. 对危险区两人的 S 做修正：S' = S + θ_save * (J - J_mean_bottom2)
-        # 3. 似然只对危险区两人做 Plackett-Luce
-
-        # 找出 S 最低的两人（用大值填充无效位置）
-        S_for_sort = jnp.where(valid_contestants, S_w, jnp.inf)
-        # 获取最小的两个索引
-        bottom2_idx = jnp.argsort(S_for_sort)[:2]
-
-        # 计算危险区两人的评委分均值
-        judge_bottom2 = judge_w[bottom2_idx]
-        judge_mean_bottom2 = jnp.mean(judge_bottom2)
-
-        # 修正后的 S（只对危险区两人修正）
-        # S' = S + θ_save * (J - J_mean_bottom2)
-        judge_diff = judge_w - judge_mean_bottom2
-        S_corrected = S_w + theta_save * judge_diff
-
-        # 构建危险区 mask（只有 bottom2 的两人）
-        bottom2_mask = jnp.zeros_like(valid_contestants)
-        bottom2_mask = bottom2_mask.at[bottom2_idx[0]].set(True)
-        bottom2_mask = bottom2_mask.at[bottom2_idx[1]].set(True)
-        bottom2_mask = bottom2_mask & valid_contestants  # 确保是有效选手
-
-        # 根据是否 judge_save 选择使用的 S 和 mask
-        S_final = jnp.where(is_judge_save, S_corrected, S_w)
-        contestants_final = jnp.where(is_judge_save, bottom2_mask, valid_contestants)
-
-        # 计算 neg_tau_S
-        neg_tau_S_final = -tau * S_final
-
-        # Plackett-Luce 似然
+    # === 简单版本：无评委拯救的周（不需要排序和修正） ===
+    def pl_simple(neg_tau_S_w, valid_contestants, elim_w, elim_valid_w):
+        """标准 Plackett-Luce 对数似然（无评委拯救修正）"""
         def scan_fn(remaining, i):
             e_idx = elim_w[i]
             is_valid = elim_valid_w[i]
             log_remaining = jnp.log(remaining + 1e-10)
-            log_denom = jax.scipy.special.logsumexp(neg_tau_S_final + log_remaining)
-            ll = neg_tau_S_final[e_idx] - log_denom
+            log_denom = jax.scipy.special.logsumexp(neg_tau_S_w + log_remaining)
+            ll = neg_tau_S_w[e_idx] - log_denom
             ll = jnp.where(is_valid, ll, 0.0)
             new_remaining = jnp.where(
                 is_valid,
@@ -381,26 +349,77 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
             )
             return new_remaining, ll
 
-        init_remaining = contestants_final.astype(jnp.float32)
+        init_remaining = valid_contestants.astype(jnp.float32)
         _, lls = jax.lax.scan(scan_fn, init_remaining, jnp.arange(max_elim))
         return lls.sum()
 
-    # 计算 neg_tau_S（用于非 judge_save 周）
-    neg_tau_S_padded = -tau * S_padded  # [n_weeks, max_contestants]
+    # === 复杂版本：有评委拯救的周（需要排序和修正） ===
+    def pl_with_judge_save(neg_tau_S_w, S_w, judge_w, valid_contestants, elim_w, elim_valid_w):
+        """带评委拯救修正的 Plackett-Luce 对数似然"""
+        # 找出 S 最低的两人（危险区）
+        S_for_sort = jnp.where(valid_contestants, S_w, jnp.inf)
+        bottom2_idx = jnp.argsort(S_for_sort)[:2]
 
-    # 使用 vmap 并行计算所有周的似然
-    all_week_lls = jax.vmap(pl_single_week_with_save)(
+        # 计算危险区两人的评委分均值
+        judge_bottom2 = judge_w[bottom2_idx]
+        judge_mean_bottom2 = jnp.mean(judge_bottom2)
+
+        # 修正后的 S: S' = S + θ_save * (J - J_mean_bottom2)
+        judge_diff = judge_w - judge_mean_bottom2
+        S_corrected = S_w + theta_save * judge_diff
+        neg_tau_S_corrected = -tau * S_corrected
+
+        # 构建危险区 mask（只有 bottom2 的两人）
+        bottom2_mask = jnp.zeros_like(valid_contestants)
+        bottom2_mask = bottom2_mask.at[bottom2_idx[0]].set(True)
+        bottom2_mask = bottom2_mask.at[bottom2_idx[1]].set(True)
+        bottom2_mask = bottom2_mask & valid_contestants
+
+        # Plackett-Luce 似然（只在危险区两人中选）
+        def scan_fn(remaining, i):
+            e_idx = elim_w[i]
+            is_valid = elim_valid_w[i]
+            log_remaining = jnp.log(remaining + 1e-10)
+            log_denom = jax.scipy.special.logsumexp(neg_tau_S_corrected + log_remaining)
+            ll = neg_tau_S_corrected[e_idx] - log_denom
+            ll = jnp.where(is_valid, ll, 0.0)
+            new_remaining = jnp.where(
+                is_valid,
+                remaining.at[e_idx].set(0.0),
+                remaining
+            )
+            return new_remaining, ll
+
+        init_remaining = bottom2_mask.astype(jnp.float32)
+        _, lls = jax.lax.scan(scan_fn, init_remaining, jnp.arange(max_elim))
+        return lls.sum()
+
+    # === 分组计算：分离有/无评委拯救的周 ===
+    # 需要同时满足 has_elim 和对应的 judge_save 条件
+    no_save_mask = has_elim & (~judge_save_active)  # 有淘汰且无评委拯救
+    with_save_mask = has_elim & judge_save_active   # 有淘汰且有评委拯救
+
+    # 无评委拯救的周：使用简单版本
+    lls_no_save = jax.vmap(pl_simple)(
+        neg_tau_S_padded,  # [n_weeks, max_contestants]
+        week_mask,         # [n_weeks, max_contestants]
+        elim_local,        # [n_weeks, max_elim]
+        elim_mask          # [n_weeks, max_elim]
+    )
+
+    # 有评委拯救的周：使用复杂版本
+    lls_with_save = jax.vmap(pl_with_judge_save)(
         neg_tau_S_padded,      # [n_weeks, max_contestants]
         S_padded,              # [n_weeks, max_contestants]
         judge_score_padded,    # [n_weeks, max_contestants]
         week_mask,             # [n_weeks, max_contestants]
         elim_local,            # [n_weeks, max_elim]
-        elim_mask,             # [n_weeks, max_elim]
-        judge_save             # [n_weeks]
+        elim_mask              # [n_weeks, max_elim]
     )
 
-    # 只对有淘汰的周求和
-    total_ll = jnp.sum(jnp.where(has_elim, all_week_lls, 0.0))
+    # 根据 mask 选择对应的似然值并求和
+    total_ll = (jnp.sum(jnp.where(no_save_mask, lls_no_save, 0.0)) +
+                jnp.sum(jnp.where(with_save_mask, lls_with_save, 0.0)))
 
     numpyro.factor('likelihood', total_ll)
 
@@ -605,7 +624,6 @@ def train(config, model_params, datas):
              linear_feature_names=model_params.get('linear_feature_names'))
 
     print("    [train] MCMC completed")
-    datas['mcmc'] = mcmc
     datas['trace'] = mcmc.get_samples()
     # 保存特征处理信息用于预测
     datas['feature_means'] = model_params.get('feature_means')
