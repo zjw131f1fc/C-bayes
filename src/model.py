@@ -87,7 +87,7 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
     }
 
 
-def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
+def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb_spline_bases=None):
     """NumPyro 模型定义 (完全向量化版本)"""
     n_celebs = train_data['n_celebs']
     n_pros = train_data['n_pros']
@@ -100,8 +100,30 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
         dist.Normal(0, prior['beta_celeb_scale']).expand([train_data['X_celeb'].shape[1]]))
     alpha_sigma = numpyro.sample('alpha_sigma',
         dist.InverseGamma(prior['sigma_celeb']['a'], prior['sigma_celeb']['b']))
-    alpha_eps = numpyro.sample('alpha_eps', dist.Normal(0, 1).expand([n_celebs]))
-    alpha_raw = jnp.dot(train_data['X_celeb'], alpha_beta) + alpha_sigma * alpha_eps
+
+    # 名人效应噪声：Normal 或 Student-t
+    if model_cfg.get('use_student_t_effects', False):
+        celeb_df_fixed = model_cfg.get('celeb_df')
+        if celeb_df_fixed is None:
+            alpha_df = numpyro.sample('alpha_df',
+                dist.Gamma(prior['celeb_df_prior']['a'], prior['celeb_df_prior']['b']))
+            alpha_df = alpha_df + 2.0
+        else:
+            alpha_df = celeb_df_fixed
+        alpha_eps = numpyro.sample('alpha_eps',
+            dist.StudentT(df=alpha_df, loc=0, scale=1).expand([n_celebs]))
+    else:
+        alpha_eps = numpyro.sample('alpha_eps', dist.Normal(0, 1).expand([n_celebs]))
+
+    # 名人级样条贡献
+    celeb_spline_contrib = 0.0
+    if celeb_spline_bases is not None:
+        for i, basis in enumerate(celeb_spline_bases):
+            coef = numpyro.sample(f'celeb_spline_{i}_coef',
+                dist.Normal(0, prior['spline_smoothing_scale']).expand([basis.shape[1]]))
+            celeb_spline_contrib = celeb_spline_contrib + jnp.dot(basis, coef)
+
+    alpha_raw = jnp.dot(train_data['X_celeb'], alpha_beta) + alpha_sigma * alpha_eps + celeb_spline_contrib
     alpha = numpyro.deterministic('alpha', alpha_raw - jnp.mean(alpha_raw))
 
     # 舞者效应 δ
@@ -109,14 +131,53 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
         dist.Normal(0, prior['beta_pro_scale']).expand([train_data['X_pro'].shape[1]]))
     delta_sigma = numpyro.sample('delta_sigma',
         dist.InverseGamma(prior['sigma_pro']['a'], prior['sigma_pro']['b']))
-    delta_eps = numpyro.sample('delta_eps', dist.Normal(0, 1).expand([n_pros]))
+
+    # 舞者效应噪声：Normal 或 Student-t
+    if model_cfg.get('use_student_t_effects', False):
+        pro_df_fixed = model_cfg.get('pro_df')
+        if pro_df_fixed is None:
+            delta_df = numpyro.sample('delta_df',
+                dist.Gamma(prior['pro_df_prior']['a'], prior['pro_df_prior']['b']))
+            delta_df = delta_df + 2.0
+        else:
+            delta_df = pro_df_fixed
+        delta_eps = numpyro.sample('delta_eps',
+            dist.StudentT(df=delta_df, loc=0, scale=1).expand([n_pros]))
+    else:
+        delta_eps = numpyro.sample('delta_eps', dist.Normal(0, 1).expand([n_pros]))
+
     delta_raw = jnp.dot(train_data['X_pro'], delta_beta) + delta_sigma * delta_eps
     delta = numpyro.deterministic('delta', delta_raw - jnp.mean(delta_raw))
 
     # 线性特征贡献
     if X_lin is not None and X_lin.shape[1] > 0:
-        beta_obs = numpyro.sample('beta_obs',
-            dist.Normal(0, prior['beta_obs_scale']).expand([X_lin.shape[1]]))
+        n_features = X_lin.shape[1]
+
+        if model_cfg.get('use_horseshoe', False):
+            # Regularized Horseshoe 先验：自动稀疏化 + slab 限制
+            # 参考: Piironen & Vehtari (2017) "Sparsity information and regularization in the horseshoe"
+
+            # 全局收缩参数 τ
+            tau_hs = numpyro.sample('tau_hs', dist.HalfCauchy(1.0))
+
+            # 局部收缩参数 λ_j
+            lambda_hs = numpyro.sample('lambda_hs', dist.HalfCauchy(1.0).expand([n_features]))
+
+            # Slab 方差 c² (限制大系数的最大值)
+            c2_hs = numpyro.sample('c2_hs', dist.InverseGamma(2.0, 1.0))
+
+            # Regularized 局部方差: λ̃_j² = c² * λ_j² / (c² + τ² * λ_j²)
+            lambda2 = lambda_hs ** 2
+            tau2 = tau_hs ** 2
+            lambda_tilde2 = c2_hs * lambda2 / (c2_hs + tau2 * lambda2)
+            scale = tau_hs * jnp.sqrt(lambda_tilde2)
+
+            # 系数
+            beta_obs = numpyro.sample('beta_obs', dist.Normal(0, scale))
+        else:
+            beta_obs = numpyro.sample('beta_obs',
+                dist.Normal(0, prior['beta_obs_scale']).expand([n_features]))
+
         lin_contrib = jnp.dot(X_lin, beta_obs)
     else:
         lin_contrib = 0.0
@@ -129,7 +190,31 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week):
         spline_contrib = spline_contrib + jnp.dot(basis, coef)
 
     # 潜在投票强度 μ
-    mu = alpha[celeb_idx] + delta[pro_idx] + lin_contrib + spline_contrib
+    mu_mean = alpha[celeb_idx] + delta[pro_idx] + lin_contrib + spline_contrib
+
+    # 观测级噪声（Student-t 分布）
+    if model_cfg.get('obs_noise', False):
+        # 噪声尺度
+        sigma_obs = numpyro.sample('sigma_obs',
+            dist.InverseGamma(prior['sigma_obs']['a'], prior['sigma_obs']['b']))
+
+        # 自由度（可学习或固定）
+        obs_df_fixed = model_cfg.get('obs_noise_df')
+        if obs_df_fixed is None:
+            # 学习自由度，Gamma 先验
+            obs_df = numpyro.sample('obs_df',
+                dist.Gamma(prior['obs_df_prior']['a'], prior['obs_df_prior']['b']))
+            obs_df = obs_df + 2.0  # 确保 df > 2，方差有限
+        else:
+            obs_df = obs_df_fixed
+
+        # Student-t 噪声
+        obs_eps = numpyro.sample('obs_eps',
+            dist.StudentT(df=obs_df, loc=0, scale=1).expand([n_obs]))
+        mu = mu_mean + sigma_obs * obs_eps
+    else:
+        mu = mu_mean
+
     numpyro.deterministic('mu', mu)
 
     # === 向量化: 按周分组 softmax 计算 P_fan ===
@@ -324,13 +409,35 @@ def build_model(config, datas):
         X_obs = X_obs - feature_means
         print(f"  [build_model] Centered {len(X_obs_names)} obs features")
 
-    # 分离线性/样条特征
+    # 分离线性/样条特征（观测级）
     spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
     linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
 
     X_lin = X_obs[:, linear_cols] if linear_cols else None
     spline_bases = [_build_spline_basis(X_obs[:, c], model_cfg['n_spline_knots'],
                                         model_cfg['spline_degree']) for c in spline_cols]
+    spline_feature_names = [X_obs_names[c] for c in spline_cols]
+    if spline_features:
+        print(f"  [build_model] Obs spline features: {spline_feature_names}")
+
+    # === 处理名人级样条特征 ===
+    celeb_spline_features = model_cfg.get('celeb_spline_features') or []
+    X_celeb_full = train_data['X_celeb']  # 原始名人特征
+    X_celeb_names_full = train_data['X_celeb_names']
+    celeb_spline_bases = []
+    celeb_spline_feature_names = []
+    if celeb_spline_features:
+        print(f"  [build_model] Building celeb spline features:")
+        for feat_name in celeb_spline_features:
+            if feat_name in X_celeb_names_full:
+                col_idx = X_celeb_names_full.index(feat_name)
+                basis = _build_spline_basis(X_celeb_full[:, col_idx],
+                                           model_cfg['n_spline_knots'], model_cfg['spline_degree'])
+                celeb_spline_bases.append(basis)
+                celeb_spline_feature_names.append(feat_name)
+                print(f"    + {feat_name} spline basis: {basis.shape}")
+            else:
+                print(f"    ! {feat_name} not found in X_celeb_names")
 
     # 构建向量化week数据
     vec_week = _build_vectorized_week_data(
@@ -351,6 +458,9 @@ def build_model(config, datas):
         'model_cfg': model_cfg,
         'X_lin': X_lin,
         'spline_bases': spline_bases,
+        'spline_feature_names': spline_feature_names,
+        'celeb_spline_bases': celeb_spline_bases if celeb_spline_bases else None,
+        'celeb_spline_feature_names': celeb_spline_feature_names,
         'vec_week': vec_week,
         'feature_means': feature_means,
         'X_obs_names': X_obs_names,
@@ -383,7 +493,8 @@ def train(config, model_params, datas):
              model_cfg=model_params['model_cfg'],
              X_lin=model_params['X_lin'],
              spline_bases=model_params['spline_bases'],
-             vec_week=model_params['vec_week'])
+             vec_week=model_params['vec_week'],
+             celeb_spline_bases=model_params.get('celeb_spline_bases'))
 
     print("    [train] MCMC completed")
     datas['mcmc'] = mcmc
@@ -391,6 +502,9 @@ def train(config, model_params, datas):
     # 保存特征处理信息用于预测
     datas['feature_means'] = model_params.get('feature_means')
     datas['X_obs_names_filtered'] = model_params.get('X_obs_names')
+    datas['celeb_spline_bases'] = model_params.get('celeb_spline_bases')
+    datas['celeb_spline_feature_names'] = model_params.get('celeb_spline_feature_names')
+    datas['spline_feature_names'] = model_params.get('spline_feature_names')
     return datas
 
 
@@ -407,8 +521,17 @@ def extract_posterior(config, datas):
     if 'beta_obs' in samples:
         datas['posterior_samples']['beta_obs'] = np.array(samples['beta_obs'])
 
+    # 观测级样条系数
     for i in range(20):
         key = f'spline_{i}_coef'
+        if key in samples:
+            datas['posterior_samples'][key] = np.array(samples[key])
+        else:
+            break
+
+    # 名人级样条系数
+    for i in range(20):
+        key = f'celeb_spline_{i}_coef'
         if key in samples:
             datas['posterior_samples'][key] = np.array(samples[key])
         else:
@@ -423,15 +546,32 @@ def extract_posterior(config, datas):
 def compute_metrics(config, datas):
     """计算评估指标"""
     S_samples = datas['S_samples']  # [n_samples, n_obs]
+    P_fan_samples = datas.get('P_fan_samples')  # [n_samples, n_obs]
     week_data = datas['train_data']['week_data']
 
     n_samples = S_samples.shape[0]
+    S_mean = S_samples.mean(axis=0)  # 后验均值
     week_results = []
 
     for wd in week_data:
         k = wd['n_eliminated']
+        season = wd['season']
+        week = wd['week']
+
+        # 赛季类型分类
+        if season <= 10:
+            season_era = 'Early'
+        elif season <= 20:
+            season_era = 'Middle'
+        else:
+            season_era = 'Late'
+
         if k == 0:
-            week_results.append({'accuracy': None, 'season': wd['season'], 'week': wd['week']})
+            week_results.append({
+                'accuracy': None, 'accuracy_mean': None,
+                'season': season, 'week': week, 'season_era': season_era,
+                'p_fan_var': None, 'decision_gap': None,
+            })
             continue
 
         mask = wd['obs_mask']
@@ -440,6 +580,7 @@ def compute_metrics(config, datas):
         elim_global = np.where(wd['eliminated_mask'])[0]
         actual_elim = set(np.searchsorted(indices, elim_global))
 
+        # 1. 按后验样本计算准确率 (Acc_B)
         correct_count = 0
         for s in range(n_samples):
             S_week = S_samples[s, mask]
@@ -454,22 +595,60 @@ def compute_metrics(config, datas):
             if correct:
                 correct_count += 1
 
-        accuracy = correct_count / n_samples
+        accuracy = correct_count / n_samples  # p_i
+
+        # 2. 按后验均值计算准确率 (Acc_A)
+        S_week_mean = S_mean[mask]
+        if wd['judge_save_active']:
+            pred_danger_mean = set(np.argsort(S_week_mean)[:2])
+            correct_mean = actual_elim.issubset(pred_danger_mean)
+        else:
+            pred_elim_mean = set(np.argsort(S_week_mean)[:k])
+            correct_mean = pred_elim_mean == actual_elim
+
+        accuracy_mean = 1.0 if correct_mean else 0.0  # f(S̄)
+
+        # 3. 决策缺口 δ_i = |f(S̄) - p_i|
+        decision_gap = abs(accuracy_mean - accuracy)
+
+        # 4. P_fan 后验样本方差（该周所有选手的平均方差）
+        p_fan_var = None
+        if P_fan_samples is not None:
+            P_fan_week = P_fan_samples[:, mask]  # [n_samples, n_contestants]
+            p_fan_var = float(np.mean(np.var(P_fan_week, axis=0)))
+
         week_results.append({
-            'accuracy': accuracy,
-            'season': wd['season'],
-            'week': wd['week'],
+            'accuracy': accuracy,           # p_i (Acc_B per week)
+            'accuracy_mean': accuracy_mean, # f(S̄) (Acc_A per week)
+            'decision_gap': decision_gap,   # δ_i
+            'p_fan_var': p_fan_var,         # 后验样本方差
+            'season': season,
+            'week': week,
+            'season_era': season_era,
             'judge_save': wd['judge_save_active'],
+            'n_contestants': int(mask.sum()),
+            'n_eliminated': k,
         })
 
-    valid_acc = [r['accuracy'] for r in week_results if r['accuracy'] is not None]
+    valid_results = [r for r in week_results if r['accuracy'] is not None]
+    valid_acc = [r['accuracy'] for r in valid_results]
+    valid_acc_mean = [r['accuracy_mean'] for r in valid_results]
+    valid_gap = [r['decision_gap'] for r in valid_results]
+    valid_var = [r['p_fan_var'] for r in valid_results if r['p_fan_var'] is not None]
+
     datas['metrics'] = {
         'week_results': week_results,
-        'mean_accuracy': np.mean(valid_acc) if valid_acc else 0.0,
+        'mean_accuracy': np.mean(valid_acc) if valid_acc else 0.0,              # 全局 Acc_B
+        'mean_accuracy_expectation': np.mean(valid_acc_mean) if valid_acc_mean else 0.0,  # 全局 Acc_A
+        'mean_decision_gap': np.mean(valid_gap) if valid_gap else 0.0,          # 全局平均决策风险
+        'mean_p_fan_var': np.mean(valid_var) if valid_var else 0.0,             # 全局平均后验方差
         'n_weeks_evaluated': len(valid_acc),
     }
 
-    print(f"Mean accuracy: {datas['metrics']['mean_accuracy']:.3f} ({len(valid_acc)} weeks)")
+    print(f"Mean accuracy (Acc_B, posterior samples): {datas['metrics']['mean_accuracy']:.3f} ({len(valid_acc)} weeks)")
+    print(f"Mean accuracy (Acc_A, expectation):       {datas['metrics']['mean_accuracy_expectation']:.3f}")
+    print(f"Mean decision gap (|Acc_A - Acc_B|):      {datas['metrics']['mean_decision_gap']:.3f}")
+    print(f"Mean P_fan variance:                      {datas['metrics']['mean_p_fan_var']:.6f}")
     return datas
 
 
@@ -492,9 +671,19 @@ def generate_output(config, datas):
     # 获取观测特征
     X_obs = td['X_obs'].copy()
     X_obs_names = list(td['X_obs_names'])
+    X_obs_orig = X_obs.copy()
+    X_obs_names_orig = list(X_obs_names)
     spline_features = model_cfg['spline_features'] or []
     exclude_obs = model_cfg.get('exclude_obs_features') or []
+    obs_interaction = model_cfg.get('obs_interaction_features') or []
     center_features = model_cfg.get('center_features', False)
+
+    # 添加观测特征交互项（在排除之前，使用原始特征）
+    if obs_interaction:
+        for expr in obs_interaction:
+            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
+            X_obs = np.column_stack([X_obs, new_col])
+            X_obs_names.append(new_name)
 
     # 过滤掉排除的观测特征
     if exclude_obs:
@@ -574,3 +763,103 @@ def generate_output(config, datas):
 
     datas['model_output'] = output
     return datas
+
+
+def predict(config, train_datas, eval_datas):
+    """用后验样本对 eval_datas 计算 S 和 P_fan"""
+    from scipy.special import softmax
+    from tqdm import tqdm
+
+    posterior = train_datas['posterior_samples']
+    td = eval_datas['train_data']
+    model_cfg = config['model']
+
+    n_samples = posterior['alpha'].shape[0]
+    n_obs = td['n_obs']
+
+    # 索引
+    celeb_idx = td['celeb_idx']
+    pro_idx = td['pro_idx']
+
+    # 获取观测特征配置
+    X_obs_orig = td['X_obs'].copy()
+    X_obs_names_orig = list(td['X_obs_names'])
+    X_obs = X_obs_orig.copy()
+    X_obs_names = list(X_obs_names_orig)
+    spline_features = model_cfg['spline_features'] or []
+    exclude_obs = model_cfg.get('exclude_obs_features') or []
+    obs_interaction = model_cfg.get('obs_interaction_features') or []
+    center_features = model_cfg.get('center_features', False)
+
+    # 添加观测特征交互项
+    if obs_interaction:
+        for expr in obs_interaction:
+            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
+            X_obs = np.column_stack([X_obs, new_col])
+            X_obs_names.append(new_name)
+
+    # 过滤掉排除的观测特征
+    if exclude_obs:
+        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_obs]
+        X_obs = X_obs[:, keep_cols]
+        X_obs_names = [X_obs_names[i] for i in keep_cols]
+
+    # 使用训练集的均值进行中心化
+    feature_means = train_datas.get('feature_means')
+    if center_features and feature_means is not None:
+        X_obs = X_obs - feature_means
+
+    # 分离线性/样条特征
+    spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
+    linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
+
+    X_lin = X_obs[:, linear_cols] if linear_cols else None
+    spline_bases = [_build_spline_basis(X_obs[:, c], model_cfg['n_spline_knots'],
+                                        model_cfg['spline_degree']) for c in spline_cols]
+
+    # 对每个后验样本计算 S 和 P_fan
+    S_samples = np.zeros((n_samples, n_obs), dtype=np.float32)
+    P_fan_samples = np.zeros((n_samples, n_obs), dtype=np.float32)
+
+    for s in tqdm(range(n_samples), desc="Predicting"):
+        # mu = alpha[celeb_idx] + delta[pro_idx] + linear + spline
+        mu = posterior['alpha'][s, celeb_idx] + posterior['delta'][s, pro_idx]
+
+        if X_lin is not None and 'beta_obs' in posterior:
+            mu = mu + X_lin @ posterior['beta_obs'][s]
+
+        for i, basis in enumerate(spline_bases):
+            key = f'spline_{i}_coef'
+            if key in posterior:
+                mu = mu + basis @ posterior[key][s]
+
+        # P_fan = softmax(mu) per week
+        P_fan = np.zeros(n_obs, dtype=np.float32)
+        for wd in td['week_data']:
+            mask = wd['obs_mask']
+            P_fan[mask] = softmax(mu[mask])
+
+        P_fan_samples[s] = P_fan
+
+        # S = judge_score + fan_score
+        S = np.zeros(n_obs, dtype=np.float32)
+        for wd in td['week_data']:
+            mask = wd['obs_mask']
+            if wd['rule_method'] == 1:  # 百分比法
+                S[mask] = td['judge_score_pct'][mask] + P_fan[mask]
+            else:  # 排名法
+                P_week = P_fan[mask]
+                n_contestants = len(P_week)
+                if n_contestants > 1:
+                    diff = P_week[:, None] - P_week[None, :]
+                    soft_rank = np.sum(1 / (1 + np.exp(-diff / 0.1)), axis=1) - 0.5
+                    R_fan = soft_rank / (n_contestants - 1)
+                else:
+                    R_fan = np.array([0.5], dtype=np.float32)
+                S[mask] = td['judge_rank_score'][mask] + R_fan
+
+        S_samples[s] = S
+
+    eval_datas['S_samples'] = S_samples
+    eval_datas['P_fan_samples'] = P_fan_samples
+    return eval_datas

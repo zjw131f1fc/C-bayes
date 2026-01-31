@@ -2,10 +2,15 @@
 
 model:
 
-  # 样条设置（从 X_obs_names 中选）
-  spline_features: null
+  # 观测级样条设置（从 X_obs_names 中选）
+  spline_features:
+    - z_score_x_cumulative_avg_score  # 拱形非线性
   n_spline_knots: 5
   spline_degree: 3
+
+  # 名人级样条设置（从 X_celeb_names 中选）
+  celeb_spline_features:
+    - age  # 倒U型非线性
 
   # 排除的观测特征
   exclude_obs_features:
@@ -13,23 +18,23 @@ model:
     - score_trend       # 与 z_score 共线性 (r=0.585)，导致系数反转
     - is_top_score      # 与 z_score 高度相关 (r=0.585)，系数方向不合理
     - perfect_score     # 与 z_score 相关 (r=0.283)，系数方向不合理
-    - weeks_survived    # 周内不变，信息量低，不确定性大
-    - season_era        # 周内不变，信息量低，不确定性大
-    - rule_method       # 周内不变，信息量低，不确定性大
+    # weeks_survived, season_era, rule_method 保留用于交互项
 
   # 排除的名人特征
   exclude_celeb_features:
     - age_centered      # 与 age 完全相同 (r=1.0)
     - age_squared       # 与 age 高度相关 (r=0.979)
     - age_bucket_old    # 与 age 高度相关 (r=0.738)
-    - log_us_state_pop  # 用交互项替代
+    # log_us_state_pop 已对国际选手置零，直接使用
 
   # 名人特征交互项
-  celeb_interaction_features:
-    - "log_us_state_pop * (1 - is_international)"  # 只对美国选手有效
+  celeb_interaction_features: null
 
-  # 观测特征交互项（测试后效果不佳，已禁用）
-  obs_interaction_features: null
+  # 观测特征交互项
+  obs_interaction_features:
+    - "teflon_factor * times_in_bottom"  # 铁氟龙效应 × 濒死次数
+    - "pro_avg_rank * z_score"           # 舞者历史排名 × 当周分数
+    - "z_score * cumulative_avg_score"   # 当周分数 × 累积平均分
 
   # 特征中心化
   center_features: true
@@ -44,9 +49,22 @@ model:
   # 约束
   sum_to_zero: true
 
+  # 观测级噪声（Student-t 分布）
+  obs_noise: true           # 是否启用观测级噪声
+  obs_noise_df: null        # 自由度，null 表示学习
+
+  # 名人/舞者效应使用 Student-t 分布
+  use_student_t_effects: true  # 是否对 alpha/delta 使用 Student-t
+  celeb_df: null               # 名人效应自由度，null 表示学习
+  pro_df: null                 # 舞者效应自由度，null 表示学习
+
 prior:
   sigma_celeb: { a: 2.0, b: 1.0 }
   sigma_pro: { a: 2.0, b: 1.0 }
+  sigma_obs: { a: 2.0, b: 1.0 }   # 观测噪声尺度先验
+  obs_df_prior: { a: 2.0, b: 0.1 } # 自由度先验 Gamma(2, 0.1)，均值20
+  celeb_df_prior: { a: 2.0, b: 0.1 } # 名人效应自由度先验
+  pro_df_prior: { a: 2.0, b: 0.1 }   # 舞者效应自由度先验
   beta_celeb_scale: 2.5
   beta_pro_scale: 2.5
   beta_obs_scale: 2.5
@@ -54,9 +72,9 @@ prior:
 
 sampling:
   n_chains: 4        # 4条链检验收敛
-  n_tune: 1000       # 1000次预热
-  n_samples: 2000    # 2000次正式采样
-  target_accept: 0.9 # 目标接受率
+  n_tune: 500       # 1000次预热
+  n_samples: 1000    # 2000次正式采样
+  target_accept: 0.85 # 目标接受率
   random_seed: 42
   cores: 4           # 并行核数
 
