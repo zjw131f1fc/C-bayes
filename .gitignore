@@ -32,3 +32,21 @@ results/
 # OS
 .DS_Store
 Thumbs.db
+
+# Temporary scripts
+check_*.py
+
+# Reference materials
+*.pdf
+
+# Temporary notes
+99方案.md
+映射.md
+第二问细化.md
+TODO.md
+
+# Temporary output files
+output.txt
+output.txt*
+feature_correlation_matrix.csv
+fold*_results.pkl
