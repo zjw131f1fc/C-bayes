@@ -154,26 +154,28 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
         n_features = X_lin.shape[1]
 
         if model_cfg.get('use_horseshoe', False):
-            # Regularized Horseshoe 先验：自动稀疏化 + slab 限制
-            # 参考: Piironen & Vehtari (2017) "Sparsity information and regularization in the horseshoe"
+            # Regularized Horseshoe 先验（非中心化参数化）
+            # 参考: Piironen & Vehtari (2017), Betancourt (2017)
 
             # 全局收缩参数 τ
             tau_hs = numpyro.sample('tau_hs', dist.HalfCauchy(1.0))
 
-            # 局部收缩参数 λ_j
-            lambda_hs = numpyro.sample('lambda_hs', dist.HalfCauchy(1.0).expand([n_features]))
+            # 局部收缩参数 λ_j（非中心化）
+            lambda_hs_raw = numpyro.sample('lambda_hs_raw', dist.HalfNormal(1.0).expand([n_features]))
+            lambda_hs = numpyro.deterministic('lambda_hs', lambda_hs_raw)
 
             # Slab 方差 c² (限制大系数的最大值)
             c2_hs = numpyro.sample('c2_hs', dist.InverseGamma(2.0, 1.0))
 
-            # Regularized 局部方差: λ̃_j² = c² * λ_j² / (c² + τ² * λ_j²)
+            # Regularized 局部方差: λ̃² = c² * λ² / (c² + τ² * λ²)
             lambda2 = lambda_hs ** 2
             tau2 = tau_hs ** 2
             lambda_tilde2 = c2_hs * lambda2 / (c2_hs + tau2 * lambda2)
             scale = tau_hs * jnp.sqrt(lambda_tilde2)
 
-            # 系数
-            beta_obs = numpyro.sample('beta_obs', dist.Normal(0, scale))
+            # 非中心化参数化：beta = scale * beta_raw
+            beta_raw = numpyro.sample('beta_raw', dist.Normal(0, 1).expand([n_features]))
+            beta_obs = numpyro.deterministic('beta_obs', scale * beta_raw)
         else:
             beta_obs = numpyro.sample('beta_obs',
                 dist.Normal(0, prior['beta_obs_scale']).expand([n_features]))

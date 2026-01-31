@@ -1,10 +1,15 @@
 # Data files
-# *.pkl
-# *.pickle
+*.pkl
+*.pickle
 data/
 
-./start_claude.sh
+# Claude local settings
+.claude/
 
+# Start script
+start_claude.sh
+
+# JAX cache
 .jax_cache
 # Python cache
 __pycache__/
