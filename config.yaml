@@ -4,7 +4,7 @@ model:
 
   # 观测级样条设置（从 X_obs_names 中选）
   spline_features:
-    - z_score_x_cumulative_avg_score  # 拱形非线性
+    - judge_score_season_zscore_x_cumulative_avg_score  # 拱形非线性
   n_spline_knots: 5
   spline_degree: 3
 
@@ -22,7 +22,9 @@ model:
     - youtube_view_count_norm   # SNR=0.04，不确定性高
     - youtube_like_count_norm   # SNR=0.04，不确定性高
     - youtube_comment_count_norm # SNR=0.35，不确定性高
-    # weeks_survived, season_era, rule_method 保留用于交互项
+    - rule_method       # 后验std=4.0，不确定性过高
+    - season_era        # 后验std=4.0，不确定性过高
+    - weeks_survived    # 后验std=4.0，改用交互项
 
   # 排除的名人特征
   exclude_celeb_features:
@@ -42,12 +44,14 @@ model:
   # 观测特征交互项
   obs_interaction_features:
     - "teflon_factor * times_in_bottom"  # 铁氟龙效应 × 濒死次数
-    - "pro_avg_rank * z_score"           # 舞者历史排名 × 当周分数
-    - "z_score * cumulative_avg_score"   # 当周分数 × 累积平均分
+    - "pro_avg_rank * judge_score_season_zscore"           # 舞者历史排名 × 当周分数
+    - "judge_score_season_zscore * cumulative_avg_score"   # 当周分数 × 累积平均分
+    - "weeks_survived * teflon_factor"   # 存活周数 × 铁氟龙（粉丝疲劳效应）
+    - "weeks_survived * times_in_bottom" # 存活周数 × 濒死次数（累积风险）
 
   # 正向先验特征（系数强制为正）
   positive_prior_features:
-    - z_score  # 观众分与评委分正相关
+    - judge_score_season_zscore  # 观众分与评委分正相关
 
   # 特征中心化
   center_features: true
@@ -59,6 +63,11 @@ model:
   tau_init: 1.0
   learn_tau: true
 
+  # P_fan 归一化方式
+  p_fan_normalize: softmax  # 'linear' or 'softmax'
+  t_fan_init: 2.0           # softmax 温度参数（高温度 → 更平滑，保留小值差异）
+  learn_t_fan: false        # 是否学习温度参数
+
   # 评委拯救修正
   use_judge_save_correction: true  # 是否启用评委拯救修正
   theta_save_scale: 1.0            # θ_save 先验尺度 (HalfNormal)
@@ -67,11 +76,11 @@ model:
   sum_to_zero: true
 
   # 观测级噪声（Student-t 分布）
-  obs_noise: true           # 是否启用观测级噪声
+  obs_noise: false          # 是否启用观测级噪声
   obs_noise_df: null        # 自由度，null 表示学习
 
   # 名人/舞者效应使用 Student-t 分布
-  use_student_t_effects: true  # 是否对 alpha/delta 使用 Student-t
+  use_student_t_effects: false # 是否对 alpha/delta 使用 Student-t
   celeb_df: null               # 名人效应自由度，null 表示学习
   pro_df: null                 # 舞者效应自由度，null 表示学习
 

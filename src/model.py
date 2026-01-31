@@ -189,27 +189,17 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
             scale = tau_hs * jnp.sqrt(lambda_tilde2)
 
             # 非中心化参数化：beta = scale * beta_raw
-            # 正向先验特征用 HalfNormal，其他用 Normal
             beta_raw = numpyro.sample('beta_raw', dist.Normal(0, 1).expand([n_features]))
             beta_obs_raw = scale * beta_raw
             # 对正向先验特征取绝对值
             beta_obs = numpyro.deterministic('beta_obs',
                 jnp.where(positive_mask, jnp.abs(beta_obs_raw), beta_obs_raw))
         else:
-            # 分别采样正向和普通特征
-            beta_list = []
-            for i in range(n_features):
-                name = linear_feature_names[i] if linear_feature_names else f'feat_{i}'
-                if name in positive_prior_features:
-                    # 正向先验：HalfNormal
-                    beta_i = numpyro.sample(f'beta_obs_{i}',
-                        dist.HalfNormal(prior['beta_obs_scale']))
-                else:
-                    # 普通先验：Normal
-                    beta_i = numpyro.sample(f'beta_obs_{i}',
-                        dist.Normal(0, prior['beta_obs_scale']))
-                beta_list.append(beta_i)
-            beta_obs = numpyro.deterministic('beta_obs', jnp.stack(beta_list))
+            # 向量化采样，然后对正向先验特征取绝对值
+            beta_obs_raw = numpyro.sample('beta_obs_raw',
+                dist.Normal(0, prior['beta_obs_scale']).expand([n_features]))
+            beta_obs = numpyro.deterministic('beta_obs',
+                jnp.where(positive_mask, jnp.abs(beta_obs_raw), beta_obs_raw))
 
         lin_contrib = jnp.dot(X_lin, beta_obs)
     else:
@@ -260,13 +250,33 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
     safe_indices = jnp.where(week_indices >= 0, week_indices, 0)
     mu_padded = mu[safe_indices]  # [n_weeks, max_contestants]
 
-    # 线性归一化: P_fan = (mu - min) / sum(mu - min)
-    mu_masked = jnp.where(week_mask, mu_padded, jnp.inf)  # 无效位置设为inf，不影响min
-    mu_min = jnp.min(mu_masked, axis=1, keepdims=True)  # [n_weeks, 1]
-    mu_shifted = jnp.where(week_mask, mu_padded - mu_min, 0.0)  # 平移到非负
-    mu_sum = jnp.sum(mu_shifted, axis=1, keepdims=True) + 1e-10  # 防止除零
-    P_fan_padded = mu_shifted / mu_sum  # [n_weeks, max_contestants]
-    P_fan_padded = jnp.where(week_mask, P_fan_padded, 0.0)
+    # === P_fan 归一化方式选择 ===
+    normalize_method = model_cfg.get('p_fan_normalize', 'softmax')  # 'linear' or 'softmax'
+
+    if normalize_method == 'softmax':
+        # Softmax 归一化: P_fan = softmax(mu / T_fan)
+        # 温度参数 T_fan 控制平滑度：T 大 → 更均匀，T 小 → 更尖锐
+        if model_cfg.get('learn_t_fan', False):
+            T_fan = numpyro.sample('T_fan', dist.HalfNormal(model_cfg.get('t_fan_init', 1.0)))
+        else:
+            T_fan = model_cfg.get('t_fan_init', 1.0)
+
+        # 数值稳定的 softmax：减去最大值
+        mu_masked = jnp.where(week_mask, mu_padded, -jnp.inf)  # 无效位置设为-inf
+        mu_max = jnp.max(mu_masked, axis=1, keepdims=True)  # [n_weeks, 1]
+        mu_shifted = mu_padded - mu_max  # 数值稳定
+        exp_mu = jnp.exp(mu_shifted / T_fan)
+        exp_mu = jnp.where(week_mask, exp_mu, 0.0)  # 无效位置为0
+        exp_sum = jnp.sum(exp_mu, axis=1, keepdims=True) + 1e-10
+        P_fan_padded = exp_mu / exp_sum
+    else:
+        # 线性归一化: P_fan = (mu - min) / sum(mu - min)
+        mu_masked = jnp.where(week_mask, mu_padded, jnp.inf)  # 无效位置设为inf，不影响min
+        mu_min = jnp.min(mu_masked, axis=1, keepdims=True)  # [n_weeks, 1]
+        mu_shifted = jnp.where(week_mask, mu_padded - mu_min, 0.0)  # 平移到非负
+        mu_sum = jnp.sum(mu_shifted, axis=1, keepdims=True) + 1e-10  # 防止除零
+        P_fan_padded = mu_shifted / mu_sum  # [n_weeks, max_contestants]
+        P_fan_padded = jnp.where(week_mask, P_fan_padded, 0.0)
 
     # 向量化散射: 使用预计算的反向映射
     P_fan = P_fan_padded[obs_to_week, obs_to_pos]
@@ -836,13 +846,24 @@ def generate_output(config, datas):
 
     mu = alpha_contrib + delta_contrib + linear_contrib + spline_contrib
 
-    # 线性归一化计算 P_fan
+    # P_fan 归一化
+    normalize_method = model_cfg.get('p_fan_normalize', 'softmax')
+    T_fan = model_cfg.get('t_fan_init', 1.0)
+
     P_fan = np.zeros(n_obs, dtype=np.float32)
     for wd in td['week_data']:
         mask = wd['obs_mask']
         mu_week = mu[mask]
-        mu_shifted = mu_week - mu_week.min()
-        P_fan[mask] = mu_shifted / (mu_shifted.sum() + 1e-10)
+
+        if normalize_method == 'softmax':
+            # Softmax 归一化
+            mu_shifted = mu_week - mu_week.max()  # 数值稳定
+            exp_mu = np.exp(mu_shifted / T_fan)
+            P_fan[mask] = exp_mu / (exp_mu.sum() + 1e-10)
+        else:
+            # 线性归一化
+            mu_shifted = mu_week - mu_week.min()
+            P_fan[mask] = mu_shifted / (mu_shifted.sum() + 1e-10)
 
     output = {
         'n_obs': n_obs,
@@ -942,13 +963,27 @@ def predict(config, train_datas, eval_datas):
             if key in posterior:
                 mu = mu + basis @ posterior[key][s]
 
-        # 线性归一化计算 P_fan
+        # P_fan 归一化
+        normalize_method = model_cfg.get('p_fan_normalize', 'softmax')
+        T_fan = model_cfg.get('t_fan_init', 1.0)
+        # 如果学习 T_fan，使用后验样本
+        if model_cfg.get('learn_t_fan', False) and 'T_fan' in posterior:
+            T_fan = posterior['T_fan'][s]
+
         P_fan = np.zeros(n_obs, dtype=np.float32)
         for wd in td['week_data']:
             mask = wd['obs_mask']
             mu_week = mu[mask]
-            mu_shifted = mu_week - mu_week.min()
-            P_fan[mask] = mu_shifted / (mu_shifted.sum() + 1e-10)
+
+            if normalize_method == 'softmax':
+                # Softmax 归一化
+                mu_shifted = mu_week - mu_week.max()  # 数值稳定
+                exp_mu = np.exp(mu_shifted / T_fan)
+                P_fan[mask] = exp_mu / (exp_mu.sum() + 1e-10)
+            else:
+                # 线性归一化
+                mu_shifted = mu_week - mu_week.min()
+                P_fan[mask] = mu_shifted / (mu_shifted.sum() + 1e-10)
 
         P_fan_samples[s] = P_fan
 
