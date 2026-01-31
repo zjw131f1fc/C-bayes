@@ -319,7 +319,7 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
     else:
         theta_save = 0.0
 
-    # === 分组向量化: Plackett-Luce 似然（优化：分离有/无评委拯救的周） ===
+    # === 向量化 Plackett-Luce 似然（使用 jax.lax.cond 条件分支优化） ===
     elim_local = vec_week['elim_local']      # [n_weeks, max_elim]
     elim_mask = vec_week['elim_mask']        # [n_weeks, max_elim]
     has_elim = vec_week['has_elim']          # [n_weeks]
@@ -394,33 +394,35 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
         _, lls = jax.lax.scan(scan_fn, init_remaining, jnp.arange(max_elim))
         return lls.sum()
 
-    # === 分组计算：分离有/无评委拯救的周 ===
-    # 需要同时满足 has_elim 和对应的 judge_save 条件
-    no_save_mask = has_elim & (~judge_save_active)  # 有淘汰且无评委拯救
-    with_save_mask = has_elim & judge_save_active   # 有淘汰且有评委拯救
+    # === 合并版本：使用 jax.lax.cond 条件分支，避免重复计算 ===
+    def pl_combined(neg_tau_S_w, S_w, judge_w, valid_contestants, elim_w, elim_valid_w,
+                    has_elim_w, judge_save_active_w):
+        """根据条件选择执行哪个似然函数，避免两次计算"""
+        def compute_with_save():
+            return pl_with_judge_save(neg_tau_S_w, S_w, judge_w, valid_contestants, elim_w, elim_valid_w)
 
-    # 无评委拯救的周：使用简单版本
-    lls_no_save = jax.vmap(pl_simple)(
-        neg_tau_S_padded,  # [n_weeks, max_contestants]
-        week_mask,         # [n_weeks, max_contestants]
-        elim_local,        # [n_weeks, max_elim]
-        elim_mask          # [n_weeks, max_elim]
-    )
+        def compute_simple():
+            return pl_simple(neg_tau_S_w, valid_contestants, elim_w, elim_valid_w)
 
-    # 有评委拯救的周：使用复杂版本
-    lls_with_save = jax.vmap(pl_with_judge_save)(
+        def compute_ll():
+            return jax.lax.cond(judge_save_active_w, compute_with_save, compute_simple)
+
+        # 如果没有淘汰，返回0；否则根据 judge_save 条件选择计算方式
+        return jax.lax.cond(has_elim_w, compute_ll, lambda: 0.0)
+
+    # 单次 vmap，每周只计算一次似然
+    lls = jax.vmap(pl_combined)(
         neg_tau_S_padded,      # [n_weeks, max_contestants]
         S_padded,              # [n_weeks, max_contestants]
         judge_score_padded,    # [n_weeks, max_contestants]
         week_mask,             # [n_weeks, max_contestants]
         elim_local,            # [n_weeks, max_elim]
-        elim_mask              # [n_weeks, max_elim]
+        elim_mask,             # [n_weeks, max_elim]
+        has_elim,              # [n_weeks]
+        judge_save_active      # [n_weeks]
     )
 
-    # 根据 mask 选择对应的似然值并求和
-    total_ll = (jnp.sum(jnp.where(no_save_mask, lls_no_save, 0.0)) +
-                jnp.sum(jnp.where(with_save_mask, lls_with_save, 0.0)))
-
+    total_ll = jnp.sum(lls)
     numpyro.factor('likelihood', total_ll)
 
 
