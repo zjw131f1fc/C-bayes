@@ -7,6 +7,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
 
+# 争议周阈值：与 filter_posterior.py 保持一致
+CONTROVERSIAL_THRESHOLD = 0.01  # 1%
+
 
 def setup_plot_style():
     """设置绘图样式"""
@@ -15,23 +18,57 @@ def setup_plot_style():
     plt.rcParams['figure.dpi'] = 150
 
 
+def get_controversial_weeks(datas):
+    """
+    获取争议周信息
+
+    返回:
+        controversial_set: set of (season, week) tuples for controversial weeks
+        week_filter_info: list of week info dicts (if available)
+    """
+    week_filter_info = datas.get('week_filter_info', [])
+    controversial_set = set()
+
+    for info in week_filter_info:
+        # 使用阈值判断，兼容旧数据
+        is_controversial = info.get('controversial', False)
+        if not is_controversial and 'rate' in info:
+            is_controversial = info['rate'] < CONTROVERSIAL_THRESHOLD
+        if is_controversial:
+            controversial_set.add((info['season'], info['week']))
+
+    return controversial_set, week_filter_info
+
+
 def plot_posterior_trajectory(datas, celeb_name, celeb_id, output_dir):
     """
     图表一：后验估计轨迹图
     展示某位选手整个赛季的粉丝投票百分比估计及不确定性
+    使用筛选后的后验样本统计量
+    争议周用虚线和不同颜色标记
 
     参数:
-        datas: 包含 P_fan_samples, train_data 的数据字典
+        datas: 包含 pfan_filtered, train_data 的数据字典
         celeb_name: 选手名称（用于标题）
         celeb_id: 选手在 celeb_idx 中的 ID
         output_dir: 输出目录
     """
     setup_plot_style()
 
-    P_fan_samples = datas['P_fan_samples']  # [n_samples, n_obs]
+    # 优先使用筛选后的数据，否则使用原始样本
+    if 'pfan_filtered' in datas:
+        pfan = datas['pfan_filtered']
+        use_filtered = True
+    else:
+        print("  Warning: pfan_filtered not found, using raw P_fan_samples")
+        use_filtered = False
+
     td = datas['train_data']
     celeb_idx = td['celeb_idx']
     week_data = td['week_data']
+
+    # 获取争议周信息
+    controversial_set, _ = get_controversial_weeks(datas)
 
     # 找到该选手的所有观测点
     celeb_mask = celeb_idx == celeb_id
@@ -43,9 +80,11 @@ def plot_posterior_trajectory(datas, celeb_name, celeb_id, output_dir):
 
     # 收集每周的数据
     weeks = []
+    seasons = []
     p_fan_means = []
     p_fan_lower = []
     p_fan_upper = []
+    is_controversial = []
     eliminated_week = None
 
     for obs_idx in celeb_obs_indices:
@@ -53,17 +92,25 @@ def plot_posterior_trajectory(datas, celeb_name, celeb_id, output_dir):
         for w_idx, wd in enumerate(week_data):
             if wd['obs_mask'][obs_idx]:
                 week_num = wd['week']
+                season = wd['season']
                 weeks.append(week_num)
+                seasons.append(season)
 
-                # 该观测点的 P_fan 后验分布
-                p_fan_obs = P_fan_samples[:, obs_idx]
-                p_fan_means.append(np.mean(p_fan_obs))
+                # 使用筛选后的统计量
+                if use_filtered:
+                    p_fan_means.append(pfan['mean'][obs_idx])
+                    p_fan_lower.append(pfan['ci_lower'][obs_idx])
+                    p_fan_upper.append(pfan['ci_upper'][obs_idx])
+                else:
+                    # 回退到原始样本
+                    P_fan_samples = datas['P_fan_samples']
+                    p_fan_obs = P_fan_samples[:, obs_idx]
+                    p_fan_means.append(np.mean(p_fan_obs))
+                    p_fan_lower.append(np.percentile(p_fan_obs, 2.5))
+                    p_fan_upper.append(np.percentile(p_fan_obs, 97.5))
 
-                # 95% HDPI
-                lower = np.percentile(p_fan_obs, 2.5)
-                upper = np.percentile(p_fan_obs, 97.5)
-                p_fan_lower.append(lower)
-                p_fan_upper.append(upper)
+                # 检查是否为争议周
+                is_controversial.append((season, week_num) in controversial_set)
 
                 # 检查是否被淘汰
                 if wd['eliminated_mask'][obs_idx]:
@@ -73,20 +120,39 @@ def plot_posterior_trajectory(datas, celeb_name, celeb_id, output_dir):
     # 排序
     sort_idx = np.argsort(weeks)
     weeks = np.array(weeks)[sort_idx]
+    seasons = np.array(seasons)[sort_idx]
     p_fan_means = np.array(p_fan_means)[sort_idx]
     p_fan_lower = np.array(p_fan_lower)[sort_idx]
     p_fan_upper = np.array(p_fan_upper)[sort_idx]
+    is_controversial = np.array(is_controversial)[sort_idx]
 
     # 绘图
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # 阴影区域（95% CI）
-    ax.fill_between(weeks, p_fan_lower, p_fan_upper, alpha=0.3, color='steelblue',
+    # 绘制选手得分（一条连续的线，用不同标记区分争议周）
+    # 先画整体的置信区间
+    ax.fill_between(weeks, p_fan_lower, p_fan_upper, alpha=0.2, color='steelblue',
                     label='95% Credible Interval')
 
-    # 中心线（均值）
-    ax.plot(weeks, p_fan_means, 'o-', color='steelblue', linewidth=2, markersize=8,
-            label='Posterior Mean')
+    # 画连续的线
+    ax.plot(weeks, p_fan_means, '-', color='steelblue', linewidth=2, alpha=0.8)
+
+    # 正常周用圆形标记
+    normal_mask = ~is_controversial
+    if normal_mask.any():
+        ax.scatter(weeks[normal_mask], p_fan_means[normal_mask], marker='o', s=80,
+                   color='steelblue', zorder=3, label='Posterior Mean (Normal)')
+
+    # 争议周用方形标记 + 橙色
+    controv_mask = is_controversial
+    if controv_mask.any():
+        ax.scatter(weeks[controv_mask], p_fan_means[controv_mask], marker='s', s=100,
+                   color='orange', edgecolors='darkorange', linewidths=2,
+                   zorder=3, label='Posterior Mean (Controversial)')
+
+        # 为争议周添加垂直虚线标记
+        for w in weeks[controv_mask]:
+            ax.axvline(x=w, color='orange', linestyle=':', alpha=0.5, linewidth=1)
 
     # 淘汰标记
     if eliminated_week is not None:
@@ -98,7 +164,7 @@ def plot_posterior_trajectory(datas, celeb_name, celeb_id, output_dir):
     ax.set_ylabel('Estimated Fan Vote Share (P_fan)', fontsize=12)
     ax.set_title(f'Figure 1: Posterior Distribution of Latent Fan Votes for {celeb_name}',
                  fontsize=14)
-    ax.legend(loc='best')
+    ax.legend(loc='best', fontsize=9)
     ax.set_xticks(weeks)
     ax.grid(True, alpha=0.3)
 
@@ -115,9 +181,11 @@ def plot_score_trajectory_with_threshold(datas, celeb_name, celeb_id, output_dir
     """
     后验得分轨迹图（带淘汰临界线）
     展示某位选手某个赛季的综合得分 S 及其与淘汰临界线的关系
+    使用筛选后的后验样本统计量
+    争议周用虚线和不同颜色标记
 
     参数:
-        datas: 包含 S_samples, train_data 的数据字典
+        datas: 包含 s_filtered 或 S_samples, train_data 的数据字典
         celeb_name: 选手名称（用于标题）
         celeb_id: 选手在 celeb_idx 中的 ID
         output_dir: 输出目录
@@ -125,11 +193,22 @@ def plot_score_trajectory_with_threshold(datas, celeb_name, celeb_id, output_dir
     """
     setup_plot_style()
 
-    S_samples = datas['S_samples']  # [n_samples, n_obs]
+    # 优先使用筛选后的数据
+    if 's_filtered' in datas:
+        s_filtered = datas['s_filtered']
+        use_filtered = True
+    else:
+        print("  Warning: s_filtered not found, using raw S_samples")
+        use_filtered = False
+
+    S_samples = datas['S_samples']  # 仍需要用于计算淘汰临界线
     td = datas['train_data']
     celeb_idx = td['celeb_idx']
     week_data = td['week_data']
     n_samples = S_samples.shape[0]
+
+    # 获取争议周信息
+    controversial_set, _ = get_controversial_weeks(datas)
 
     # 找到该选手的所有观测点
     celeb_mask = celeb_idx == celeb_id
@@ -150,6 +229,7 @@ def plot_score_trajectory_with_threshold(datas, celeb_name, celeb_id, output_dir
                 season_obs[season].append({
                     'obs_idx': obs_idx,
                     'week': wd['week'],
+                    'season': season,
                     'eliminated': wd['eliminated_mask'][obs_idx],
                     'week_data': wd,
                 })
@@ -179,39 +259,61 @@ def plot_score_trajectory_with_threshold(datas, celeb_name, celeb_id, output_dir
     threshold_means = []
     threshold_lower = []
     threshold_upper = []
+    is_controversial = []
     eliminated_week = None
 
     for obs_info in obs_list:
         obs_idx = obs_info['obs_idx']
         week_num = obs_info['week']
+        season = obs_info['season']
         wd = obs_info['week_data']
         n_elim = wd['n_eliminated']
 
         weeks.append(week_num)
 
-        # 该观测点的 S 后验分布
-        s_obs = S_samples[:, obs_idx]
-        s_means.append(np.mean(s_obs))
-        s_lower.append(np.percentile(s_obs, 2.5))
-        s_upper.append(np.percentile(s_obs, 97.5))
+        # 使用筛选后的统计量
+        if use_filtered:
+            s_means.append(s_filtered['mean'][obs_idx])
+            s_lower.append(s_filtered['ci_lower'][obs_idx])
+            s_upper.append(s_filtered['ci_upper'][obs_idx])
+        else:
+            # 回退到原始样本
+            s_obs = S_samples[:, obs_idx]
+            s_means.append(np.mean(s_obs))
+            s_lower.append(np.percentile(s_obs, 2.5))
+            s_upper.append(np.percentile(s_obs, 97.5))
 
-        # 计算该周的淘汰临界线
+        # 检查是否为争议周
+        is_controversial.append((season, week_num) in controversial_set)
+
+        # 计算该周的淘汰临界线（仍使用原始样本，因为需要排序）
         week_mask = wd['obs_mask']
         week_indices = np.where(week_mask)[0]
         n_contestants = len(week_indices)
 
         if n_elim > 0 and n_contestants > n_elim:
-            thresholds = []
-            for s in range(n_samples):
-                S_week = S_samples[s, week_mask]
-                sorted_scores = np.sort(S_week)
-                threshold = sorted_scores[n_elim]
-                thresholds.append(threshold)
+            # 使用筛选后的均值计算临界线
+            if use_filtered:
+                S_week_mean = s_filtered['mean'][week_mask]
+                sorted_scores = np.sort(S_week_mean)
+                threshold_means.append(sorted_scores[n_elim])
+                # 使用筛选后的CI估计临界线的不确定性
+                S_week_lower = s_filtered['ci_lower'][week_mask]
+                S_week_upper = s_filtered['ci_upper'][week_mask]
+                threshold_lower.append(np.sort(S_week_lower)[n_elim])
+                threshold_upper.append(np.sort(S_week_upper)[n_elim])
+            else:
+                thresholds = []
+                for s in range(n_samples):
+                    S_week = S_samples[s, week_mask]
+                    sorted_scores = np.sort(S_week)
+                    threshold = sorted_scores[n_elim]
+                    thresholds.append(threshold)
 
-            thresholds = np.array(thresholds)
-            threshold_means.append(np.mean(thresholds))
-            threshold_lower.append(np.percentile(thresholds, 2.5))
-            threshold_upper.append(np.percentile(thresholds, 97.5))
+                thresholds = np.array(thresholds)
+                threshold_means.append(np.mean(thresholds))
+                threshold_lower.append(np.percentile(thresholds, 2.5))
+                threshold_upper.append(np.percentile(thresholds, 97.5))
         else:
             threshold_means.append(np.nan)
             threshold_lower.append(np.nan)
@@ -229,17 +331,35 @@ def plot_score_trajectory_with_threshold(datas, celeb_name, celeb_id, output_dir
     threshold_means = np.array(threshold_means)[sort_idx]
     threshold_lower = np.array(threshold_lower)[sort_idx]
     threshold_upper = np.array(threshold_upper)[sort_idx]
+    is_controversial = np.array(is_controversial)[sort_idx]
 
     # 绘图
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # 选手得分的阴影区域（95% CI）
-    ax.fill_between(weeks, s_lower, s_upper, alpha=0.3, color='steelblue',
+    # 绘制选手得分（一条连续的线，用不同标记区分争议周）
+    # 先画整体的置信区间（灰色背景）
+    ax.fill_between(weeks, s_lower, s_upper, alpha=0.2, color='steelblue',
                     label='Score 95% CI')
 
-    # 选手得分中心线（均值）
-    ax.plot(weeks, s_means, 'o-', color='steelblue', linewidth=2, markersize=8,
-            label='Score (Posterior Mean)')
+    # 画连续的线
+    ax.plot(weeks, s_means, '-', color='steelblue', linewidth=2, alpha=0.8)
+
+    # 正常周用圆形标记
+    normal_mask = ~is_controversial
+    if normal_mask.any():
+        ax.scatter(weeks[normal_mask], s_means[normal_mask], marker='o', s=80,
+                   color='steelblue', zorder=3, label='Score (Normal)')
+
+    # 争议周用方形标记 + 橙色边框
+    controv_mask = is_controversial
+    if controv_mask.any():
+        ax.scatter(weeks[controv_mask], s_means[controv_mask], marker='s', s=100,
+                   color='orange', edgecolors='darkorange', linewidths=2,
+                   zorder=3, label='Score (Controversial)')
+
+        # 为争议周添加垂直虚线标记
+        for w in weeks[controv_mask]:
+            ax.axvline(x=w, color='orange', linestyle=':', alpha=0.5, linewidth=1)
 
     # 淘汰临界线（带置信区间）
     valid_threshold = ~np.isnan(threshold_means)
@@ -276,6 +396,7 @@ def plot_decision_gap(datas, output_dir):
     """
     图表二：决策缺口散点图
     展示 Acc_A 与 Acc_B 的差异，识别高风险预测点
+    争议周用不同标记显示
 
     横轴: p_i (后验样本中预测正确的比例)
     纵轴: δ_i = |f(S̄) - p_i|
@@ -284,10 +405,19 @@ def plot_decision_gap(datas, output_dir):
 
     week_results = datas['metrics']['week_results']
 
+    # 获取争议周信息
+    controversial_set, week_filter_info = get_controversial_weeks(datas)
+
+    # 构建 (season, week) -> controversial 映射
+    controv_map = {}
+    for info in week_filter_info:
+        controv_map[(info['season'], info['week'])] = info.get('controversial', False)
+
     # 收集数据
     p_i_list = []
     delta_i_list = []
     correct_list = []  # 点估计是否正确
+    is_controversial_list = []
 
     for wr in week_results:
         if wr['accuracy'] is None:
@@ -301,20 +431,40 @@ def plot_decision_gap(datas, output_dir):
         delta_i_list.append(delta_i)
         correct_list.append(f_mean == 1.0)
 
+        # 检查是否为争议周
+        season = wr.get('season', -1)
+        week = wr.get('week', -1)
+        is_controversial_list.append(controv_map.get((season, week), False))
+
     p_i_arr = np.array(p_i_list)
     delta_i_arr = np.array(delta_i_list)
     correct_arr = np.array(correct_list)
+    controv_arr = np.array(is_controversial_list)
 
     # 绘图
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # 正确的点（绿色）
-    ax.scatter(p_i_arr[correct_arr], delta_i_arr[correct_arr],
-               c='green', alpha=0.6, s=50, label='Correct Prediction')
+    # 正常周 - 正确的点（绿色圆形）
+    mask_normal_correct = correct_arr & ~controv_arr
+    ax.scatter(p_i_arr[mask_normal_correct], delta_i_arr[mask_normal_correct],
+               c='green', alpha=0.6, s=50, marker='o', label='Correct (Normal)')
 
-    # 错误的点（红色）
-    ax.scatter(p_i_arr[~correct_arr], delta_i_arr[~correct_arr],
-               c='red', alpha=0.6, s=50, label='Wrong Prediction')
+    # 正常周 - 错误的点（红色圆形）
+    mask_normal_wrong = ~correct_arr & ~controv_arr
+    ax.scatter(p_i_arr[mask_normal_wrong], delta_i_arr[mask_normal_wrong],
+               c='red', alpha=0.6, s=50, marker='o', label='Wrong (Normal)')
+
+    # 争议周 - 正确的点（绿色方形）
+    mask_controv_correct = correct_arr & controv_arr
+    ax.scatter(p_i_arr[mask_controv_correct], delta_i_arr[mask_controv_correct],
+               c='green', alpha=0.8, s=80, marker='s', edgecolors='orange',
+               linewidths=2, label='Correct (Controversial)')
+
+    # 争议周 - 错误的点（红色方形）
+    mask_controv_wrong = ~correct_arr & controv_arr
+    ax.scatter(p_i_arr[mask_controv_wrong], delta_i_arr[mask_controv_wrong],
+               c='red', alpha=0.8, s=80, marker='s', edgecolors='orange',
+               linewidths=2, label='Wrong (Controversial)')
 
     # 理论曲线：当 f(S̄)=1 时，δ = 1 - p；当 f(S̄)=0 时，δ = p
     # 最大 δ 在 p=0.5 时达到 0.5
@@ -326,7 +476,7 @@ def plot_decision_gap(datas, output_dir):
     ax.set_ylabel('Decision Gap ($\\delta_i = |f(\\bar{S}) - p_i|$)', fontsize=12)
     ax.set_title('Figure 2: Analysis of Local Uncertainty Bias vs. Predictive Confidence',
                  fontsize=14)
-    ax.legend(loc='upper center')
+    ax.legend(loc='upper center', fontsize=8, ncol=2)
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-0.05, 0.6)
     ax.grid(True, alpha=0.3)
@@ -334,7 +484,8 @@ def plot_decision_gap(datas, output_dir):
     # 添加统计信息
     n_correct = correct_arr.sum()
     n_total = len(correct_arr)
-    textstr = f'Total weeks: {n_total}\nCorrect: {n_correct} ({100*n_correct/n_total:.1f}%)'
+    n_controv = controv_arr.sum()
+    textstr = f'Total weeks: {n_total}\nCorrect: {n_correct} ({100*n_correct/n_total:.1f}%)\nControversial: {n_controv}'
     ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
@@ -347,9 +498,18 @@ def plot_decision_gap(datas, output_dir):
 def generate_consistency_table(datas, output_dir):
     """
     图表三：模型一致性总结表
-    按赛季类型分组统计 Acc_A, Acc_B, Δ
+    按赛季类型分组统计 Acc_A, Acc_B, Δ，并标记争议周数量
+    同时输出后验筛选后的统计
     """
     week_results = datas['metrics']['week_results']
+
+    # 获取争议周信息和筛选后的复现率
+    controversial_set, week_filter_info = get_controversial_weeks(datas)
+
+    # 构建 (season, week) -> info 映射
+    filter_info_map = {}
+    for info in week_filter_info:
+        filter_info_map[(info['season'], info['week'])] = info
 
     # 按赛季类型分组
     groups = {'Early': [], 'Middle': [], 'Late': []}
@@ -358,6 +518,12 @@ def generate_consistency_table(datas, output_dir):
         if wr['accuracy'] is None:
             continue
         era = wr['season_era']
+        # 添加争议标记和筛选后复现率
+        season = wr.get('season', -1)
+        week = wr.get('week', -1)
+        info = filter_info_map.get((season, week), {})
+        wr['is_controversial'] = info.get('controversial', False)
+        wr['filtered_rate'] = info.get('rate', 0)  # 复现率
         groups[era].append(wr)
 
     # 计算统计量
@@ -371,6 +537,14 @@ def generate_consistency_table(datas, output_dir):
         acc_a = np.mean([r['accuracy_mean'] for r in results])
         delta = acc_a - acc_b
         n_weeks = len(results)
+        n_controv = sum(1 for r in results if r.get('is_controversial', False))
+
+        # 非争议周的平均复现率
+        non_controv = [r for r in results if not r.get('is_controversial', False)]
+        if non_controv:
+            avg_repro_rate = np.mean([r['filtered_rate'] for r in non_controv])
+        else:
+            avg_repro_rate = 0
 
         table_data.append({
             'Season Category': era,
@@ -378,6 +552,9 @@ def generate_consistency_table(datas, output_dir):
             'Acc_B (Posterior)': f'{acc_b:.1%}',
             'Gap (Δ)': f'{delta:+.1%}',
             'N Weeks': n_weeks,
+            'N Controversial': n_controv,
+            'N Non-Controv': n_weeks - n_controv,
+            'Avg Repro Rate': avg_repro_rate,
         })
 
     # 全局统计
@@ -385,6 +562,14 @@ def generate_consistency_table(datas, output_dir):
     acc_b_all = np.mean([r['accuracy'] for r in all_results])
     acc_a_all = np.mean([r['accuracy_mean'] for r in all_results])
     delta_all = acc_a_all - acc_b_all
+    n_controv_all = sum(1 for r in all_results if r.get('is_controversial', False))
+
+    # 非争议周的平均复现率
+    non_controv_all = [r for r in all_results if not r.get('is_controversial', False)]
+    if non_controv_all:
+        avg_repro_rate_all = np.mean([r['filtered_rate'] for r in non_controv_all])
+    else:
+        avg_repro_rate_all = 0
 
     table_data.append({
         'Season Category': 'Overall',
@@ -392,29 +577,60 @@ def generate_consistency_table(datas, output_dir):
         'Acc_B (Posterior)': f'{acc_b_all:.1%}',
         'Gap (Δ)': f'{delta_all:+.1%}',
         'N Weeks': len(all_results),
+        'N Controversial': n_controv_all,
+        'N Non-Controv': len(all_results) - n_controv_all,
+        'Avg Repro Rate': avg_repro_rate_all,
     })
 
     # 保存为文本
     with open(f'{output_dir}/table_consistency.txt', 'w') as f:
-        f.write("Table: Model Consistency Summary\n")
-        f.write("=" * 80 + "\n")
-        f.write(f"{'Season Category':<20} {'Acc_A':<15} {'Acc_B':<15} {'Gap (Δ)':<15} {'N Weeks':<10}\n")
-        f.write("-" * 80 + "\n")
+        # 表1：原始模型一致性
+        f.write("Table 1: Model Consistency Summary (Before Filtering)\n")
+        f.write("=" * 95 + "\n")
+        f.write(f"{'Season Category':<18} {'Acc_A':<12} {'Acc_B':<12} {'Gap (Δ)':<12} {'N Weeks':<10} {'Controversial':<12}\n")
+        f.write("-" * 95 + "\n")
         for row in table_data:
-            f.write(f"{row['Season Category']:<20} {row['Acc_A (Point Est.)']:<15} "
-                    f"{row['Acc_B (Posterior)']:<15} {row['Gap (Δ)']:<15} {row['N Weeks']:<10}\n")
-        f.write("=" * 80 + "\n")
+            f.write(f"{row['Season Category']:<18} {row['Acc_A (Point Est.)']:<12} "
+                    f"{row['Acc_B (Posterior)']:<12} {row['Gap (Δ)']:<12} {row['N Weeks']:<10} {row['N Controversial']:<12}\n")
+        f.write("=" * 95 + "\n")
+
+        # 表2：后验筛选统计
+        f.write("\n\nTable 2: Posterior Filtering Statistics\n")
+        f.write("=" * 90 + "\n")
+        f.write(f"{'Season Category':<18} {'Total':<10} {'Controversial':<15} {'Non-Controv.':<15} {'Avg Repro Rate':<15}\n")
+        f.write("-" * 90 + "\n")
+        for row in table_data:
+            f.write(f"{row['Season Category']:<18} {row['N Weeks']:<10} {row['N Controversial']:<15} "
+                    f"{row['N Non-Controv']:<15} {row['Avg Repro Rate']:.1%}\n")
+        f.write("-" * 90 + "\n")
+        f.write("Note:\n")
+        f.write("  - Controversial weeks: reproduction rate < 1% (model cannot explain elimination)\n")
+        f.write("  - Avg Repro Rate: average % of posterior samples that reproduce elimination\n")
+        f.write("  - After filtering, non-controversial weeks achieve ~100% consistency\n")
+        f.write("    (by definition, we only keep samples that reproduce the result)\n")
+        f.write("=" * 90 + "\n")
 
     print(f"  Saved: {output_dir}/table_consistency.txt")
 
     # 同时打印到控制台
-    print("\n  Table: Model Consistency Summary")
+    print("\n  Table 1: Model Consistency Summary (Before Filtering)")
+    print("  " + "=" * 85)
+    print(f"  {'Season Category':<16} {'Acc_A':<10} {'Acc_B':<10} {'Gap (Δ)':<10} {'N Weeks':<8} {'Controv.':<8}")
+    print("  " + "-" * 85)
+    for row in table_data:
+        print(f"  {row['Season Category']:<16} {row['Acc_A (Point Est.)']:<10} "
+              f"{row['Acc_B (Posterior)']:<10} {row['Gap (Δ)']:<10} {row['N Weeks']:<8} {row['N Controversial']:<8}")
+    print("  " + "=" * 85)
+
+    print("\n  Table 2: Posterior Filtering Statistics")
     print("  " + "=" * 75)
-    print(f"  {'Season Category':<18} {'Acc_A':<12} {'Acc_B':<12} {'Gap (Δ)':<12} {'N Weeks':<8}")
+    print(f"  {'Season Category':<16} {'Total':<8} {'Controv.':<10} {'Non-Controv.':<12} {'Avg Repro Rate':<12}")
     print("  " + "-" * 75)
     for row in table_data:
-        print(f"  {row['Season Category']:<18} {row['Acc_A (Point Est.)']:<12} "
-              f"{row['Acc_B (Posterior)']:<12} {row['Gap (Δ)']:<12} {row['N Weeks']:<8}")
+        print(f"  {row['Season Category']:<16} {row['N Weeks']:<8} {row['N Controversial']:<10} "
+              f"{row['N Non-Controv']:<12} {row['Avg Repro Rate']:.1%}")
+    print("  " + "-" * 75)
+    print("  Note: After filtering, non-controversial weeks achieve ~100% consistency")
     print("  " + "=" * 75)
 
     return table_data

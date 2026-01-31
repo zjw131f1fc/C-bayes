@@ -16,8 +16,10 @@ model:
     - youtube_comment_count_norm  # 与 youtube_view_count_norm 高度相关 r=0.96
     # - pro_is_male               # 与 is_male 高度相关 r=-0.89（但可能有独立效应）
 
-  # 排除的名人特征
-  exclude_celeb_features: []
+  # 排除的名人特征（解决多重共线性）
+  exclude_celeb_features:
+    - "industry_Performing Arts & Entertainment"  # 作为参考类别（样本最多51%）
+    - is_international  # 与 log_us_state_pop 高度相关 r=-0.988
 
   # 禁用舞者特征（96.5%方差由性别驱动，个体差异小）
   use_pro_features: false

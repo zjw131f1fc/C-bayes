@@ -27,12 +27,17 @@ def compute_rankings_both_methods(datas, celeb_id, target_season):
     返回:
         list of dict: 每周的排名数据
     """
-    P_fan_samples = datas['P_fan_samples']
     td = datas['train_data']
     celeb_idx = td['celeb_idx']
     week_data = td['week_data']
 
-    P_fan_mean = P_fan_samples.mean(axis=0)
+    # 优先使用筛选后的后验数据
+    if 'pfan_filtered' in datas and 'mean' in datas['pfan_filtered']:
+        P_fan_mean = datas['pfan_filtered']['mean']
+    else:
+        # 回退到使用 P_fan_samples 的均值
+        P_fan_samples = datas['P_fan_samples']
+        P_fan_mean = P_fan_samples.mean(axis=0)
 
     results = []
 
@@ -238,11 +243,18 @@ def simulate_season_4scenarios(datas, target_season, n_simulations=1000):
 
     返回:
         dict: 每个选手在每种场景下的淘汰周次分布
+
+    注意:
+        此函数模拟整个赛季的淘汰链，需要使用原始 P_fan_samples 来估计不确定性。
+        不使用 pfan_filtered，因为筛选是按周独立进行的，不适合模拟整个赛季。
     """
-    P_fan_samples = datas['P_fan_samples']
     td = datas['train_data']
     celeb_idx = td['celeb_idx']
     week_data = td['week_data']
+
+    # 使用原始 P_fan_samples 进行模拟（不使用筛选后的数据）
+    # 因为筛选是按周独立进行的，不适合模拟整个赛季的淘汰链
+    P_fan_samples = datas['P_fan_samples']
 
     # 获取该赛季的所有周数据
     season_weeks = [wd for wd in week_data if wd['season'] == target_season]

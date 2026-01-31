@@ -28,13 +28,22 @@ def compute_fpi_both_methods(datas):
     百分比法: S_fan = P_fan, S_judge = judge_score_pct, S_total = S_fan + S_judge
     排名法: S_fan = R_fan, S_judge = judge_rank_score, S_total = S_fan + S_judge
 
+    优先使用筛选后的后验数据 (pfan_filtered)，如果不存在则回退到 P_fan_samples 的均值
+
     返回:
         fpi_data: list of dict, 每周的 FPI 数据
     """
-    P_fan_samples = datas['P_fan_samples']  # [n_samples, n_obs]
     td = datas['train_data']
     week_data = td['week_data']
-    n_samples, n_obs = P_fan_samples.shape
+
+    # 优先使用筛选后的后验均值，否则回退到 P_fan_samples 的均值
+    if 'pfan_filtered' in datas and 'mean' in datas['pfan_filtered']:
+        P_fan_mean = datas['pfan_filtered']['mean']  # [n_obs]
+        print("  Using pfan_filtered['mean'] for FPI computation")
+    else:
+        P_fan_samples = datas['P_fan_samples']  # [n_samples, n_obs]
+        P_fan_mean = P_fan_samples.mean(axis=0)
+        print("  Fallback: Using P_fan_samples mean for FPI computation")
 
     fpi_data = []
 
@@ -51,69 +60,53 @@ def compute_fpi_both_methods(datas):
         # 获取该周的数据
         judge_score_pct = td['judge_score_pct'][mask]  # [n_contestants]
         judge_rank_score = td['judge_rank_score'][mask]  # [n_contestants]
+        P_fan = P_fan_mean[mask]  # [n_contestants]
 
-        # 对每个后验样本计算 FPI，然后取均值
-        fpi_pct_samples = []
-        fpi_rank_samples = []
+        # === 百分比法 ===
+        S_fan_pct = P_fan
+        S_judge_pct = judge_score_pct
+        S_total_pct = S_fan_pct + S_judge_pct
 
-        for s in range(n_samples):
-            P_fan = P_fan_samples[s, mask]  # [n_contestants]
+        var_fan_pct = np.var(S_fan_pct)
+        var_total_pct = np.var(S_total_pct)
 
-            # === 百分比法 ===
-            S_fan_pct = P_fan
-            S_judge_pct = judge_score_pct
-            S_total_pct = S_fan_pct + S_judge_pct
+        if var_total_pct > 1e-10:
+            fpi_pct = var_fan_pct / var_total_pct
+        else:
+            fpi_pct = np.nan
 
-            var_fan_pct = np.var(S_fan_pct)
-            var_total_pct = np.var(S_total_pct)
+        # === 排名法 ===
+        # 计算粉丝排名分 R_fan (软排名)
+        if n_contestants > 1:
+            diff = P_fan[:, None] - P_fan[None, :]
+            soft_rank = np.sum(1 / (1 + np.exp(-diff / 0.1)), axis=1) - 0.5
+            R_fan = soft_rank / (n_contestants - 1)
+        else:
+            R_fan = np.array([0.5], dtype=np.float32)
 
-            if var_total_pct > 1e-10:
-                fpi_pct = var_fan_pct / var_total_pct
-            else:
-                fpi_pct = np.nan
-            fpi_pct_samples.append(fpi_pct)
+        S_fan_rank = R_fan
+        S_judge_rank = judge_rank_score
+        S_total_rank = S_fan_rank + S_judge_rank
 
-            # === 排名法 ===
-            # 计算粉丝排名分 R_fan (软排名)
-            if n_contestants > 1:
-                diff = P_fan[:, None] - P_fan[None, :]
-                soft_rank = np.sum(1 / (1 + np.exp(-diff / 0.1)), axis=1) - 0.5
-                R_fan = soft_rank / (n_contestants - 1)
-            else:
-                R_fan = np.array([0.5], dtype=np.float32)
+        var_fan_rank = np.var(S_fan_rank)
+        var_total_rank = np.var(S_total_rank)
 
-            S_fan_rank = R_fan
-            S_judge_rank = judge_rank_score
-            S_total_rank = S_fan_rank + S_judge_rank
+        if var_total_rank > 1e-10:
+            fpi_rank = var_fan_rank / var_total_rank
+        else:
+            fpi_rank = np.nan
 
-            var_fan_rank = np.var(S_fan_rank)
-            var_total_rank = np.var(S_total_rank)
-
-            if var_total_rank > 1e-10:
-                fpi_rank = var_fan_rank / var_total_rank
-            else:
-                fpi_rank = np.nan
-            fpi_rank_samples.append(fpi_rank)
-
-        # 计算后验均值和标准差
-        fpi_pct_samples = np.array(fpi_pct_samples)
-        fpi_rank_samples = np.array(fpi_rank_samples)
-
-        fpi_pct_mean = np.nanmean(fpi_pct_samples)
-        fpi_pct_std = np.nanstd(fpi_pct_samples)
-        fpi_rank_mean = np.nanmean(fpi_rank_samples)
-        fpi_rank_std = np.nanstd(fpi_rank_samples)
-
+        # 由于使用均值而非样本，标准差设为0
         fpi_data.append({
             'season': season,
             'week': week,
             'n_contestants': n_contestants,
-            'fpi_pct_mean': fpi_pct_mean,
-            'fpi_pct_std': fpi_pct_std,
-            'fpi_rank_mean': fpi_rank_mean,
-            'fpi_rank_std': fpi_rank_std,
-            'fpi_pct_samples': fpi_pct_samples,
-            'fpi_rank_samples': fpi_rank_samples,
+            'fpi_pct_mean': fpi_pct,
+            'fpi_pct_std': 0.0,
+            'fpi_rank_mean': fpi_rank,
+            'fpi_rank_std': 0.0,
+            'fpi_pct_samples': np.array([fpi_pct]),
+            'fpi_rank_samples': np.array([fpi_rank]),
         })
 
     return fpi_data
@@ -453,15 +446,24 @@ def compute_variance_decomposition(datas):
     """
     计算每周的方差分解
 
+    优先使用筛选后的后验数据 (pfan_filtered)，如果不存在则回退到 P_fan_samples 的均值
+
     返回:
         list of dict: 每周的方差分解数据
     """
-    P_fan_samples = datas['P_fan_samples']
     td = datas['train_data']
     week_data = td['week_data']
 
+    # 优先使用筛选后的后验均值，否则回退到 P_fan_samples 的均值
+    if 'pfan_filtered' in datas and 'mean' in datas['pfan_filtered']:
+        P_fan_mean = datas['pfan_filtered']['mean']  # [n_obs]
+        print("  Using pfan_filtered['mean'] for variance decomposition")
+    else:
+        P_fan_samples = datas['P_fan_samples']
+        P_fan_mean = P_fan_samples.mean(axis=0)
+        print("  Fallback: Using P_fan_samples mean for variance decomposition")
+
     results = []
-    P_fan_mean = P_fan_samples.mean(axis=0)
 
     for wd in week_data:
         mask = wd['obs_mask']

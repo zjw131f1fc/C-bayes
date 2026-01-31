@@ -33,21 +33,22 @@ def main():
     datas = load_data('outputs/results/results.pkl')
 
     # 检查必要数据
-    if 'P_fan_samples' not in datas:
-        print("  Error: P_fan_samples not found. Please re-run main.py first.")
+    if 'pfan_filtered' not in datas and 'P_fan_samples' not in datas:
+        print("  Error: Neither pfan_filtered nor P_fan_samples found.")
+        print("  Please run main.py and filter_posterior.py first.")
         return
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # 计算两种方法的得分
     print("\n[2] 计算两种规则的得分...")
-    S_pct, S_rank = compute_scores_both_methods(datas)
-    print(f"  S_pct shape: {S_pct.shape}")
-    print(f"  S_rank shape: {S_rank.shape}")
+    S_pct_mean, S_rank_mean = compute_scores_both_methods(datas)
+    print(f"  S_pct_mean shape: {S_pct_mean.shape}")
+    print(f"  S_rank_mean shape: {S_rank_mean.shape}")
 
     # 计算比较指标
     print("\n[3] 计算比较指标...")
-    metrics, week_details = compute_rule_comparison_metrics(datas, S_pct, S_rank)
+    metrics, week_details = compute_rule_comparison_metrics(datas, S_pct_mean, S_rank_mean)
 
     # 打印汇总统计
     print_summary_stats(datas, metrics)

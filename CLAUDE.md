@@ -58,6 +58,8 @@ C-bayes/
 │   ├── fpi.py              # FPI计算
 │   ├── controversial.py    # 争议性分析
 │   └── visualize.py        # 第二问可视化
+├── problem3_src/           # 第三问专用代码
+│   └── visualize.py        # 第三问可视化（特征影响分析）
 ├── data/
 │   └── datas.pkl           # 预处理后的数据
 ├── outputs/
@@ -65,6 +67,7 @@ C-bayes/
 │   └── results/            # 结果文件
 ├── visualize_problem1.py   # 第一问可视化入口
 ├── visualize_problem2.py   # 第二问可视化入口
+├── visualize_problem3.py   # 第三问可视化入口（特征影响分析）
 └── docs/                   # 文档
     ├── 数据接口规范.md
     ├── MODEL_OUTPUT.md
@@ -199,9 +202,21 @@ sampling:
 # 全量训练
 python main.py
 
+# 后验筛选（生成争议周标记）
+python filter_posterior.py
+
 # 第一问可视化
 python visualize_problem1.py
 
 # 第二问可视化
 python visualize_problem2.py
+
+# 第三问可视化（特征影响分析）
+python visualize_problem3.py
+```
+
+## Conda 环境路径
+
+```bash
+/data/conda/envs/bayes/bin/python
 ```

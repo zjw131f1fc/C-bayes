@@ -3,6 +3,9 @@
 import numpy as np
 from src.utils import load_config, load_data, save_data
 
+# 争议周阈值：复现率低于此值视为争议周
+CONTROVERSIAL_THRESHOLD = 0.01  # 1%
+
 
 def filter_posterior_samples(results):
     """筛选能复现淘汰结果的后验样本"""
@@ -64,7 +67,7 @@ def filter_posterior_samples(results):
             'week': wd.get('week', -1),
             'n_valid': len(valid_samples),
             'rate': rate,
-            'controversial': rate == 0
+            'controversial': rate < CONTROVERSIAL_THRESHOLD  # 复现率低于阈值视为争议周
         })
 
     return week_valid_samples, week_info
@@ -109,6 +112,45 @@ def compute_filtered_pfan(results, week_valid_samples):
     return pfan_output
 
 
+def compute_filtered_s(results, week_valid_samples):
+    """计算筛选后的S分布（综合得分）"""
+    S_samples = results['S_samples']
+    train_data = results['train_data']
+    week_data = train_data['week_data']
+
+    n_samples, n_obs = S_samples.shape
+
+    # 输出结构
+    s_output = {
+        'mean': np.zeros(n_obs, dtype=np.float32),
+        'std': np.zeros(n_obs, dtype=np.float32),
+        'ci_lower': np.zeros(n_obs, dtype=np.float32),
+        'ci_upper': np.zeros(n_obs, dtype=np.float32),
+        'n_valid_samples': np.zeros(n_obs, dtype=np.int32),
+    }
+
+    for w, wd in enumerate(week_data):
+        obs_mask = wd['obs_mask']
+        week_obs = np.where(obs_mask)[0]
+        valid_samples = week_valid_samples[w]
+
+        if len(valid_samples) == 0:
+            # 争议性周：使用全部样本
+            valid_samples = np.arange(n_samples)
+
+        # 筛选后的S样本
+        S_filtered = S_samples[valid_samples][:, week_obs]
+
+        # 计算统计量
+        s_output['mean'][week_obs] = S_filtered.mean(axis=0)
+        s_output['std'][week_obs] = S_filtered.std(axis=0)
+        s_output['ci_lower'][week_obs] = np.percentile(S_filtered, 2.5, axis=0)
+        s_output['ci_upper'][week_obs] = np.percentile(S_filtered, 97.5, axis=0)
+        s_output['n_valid_samples'][week_obs] = len(valid_samples)
+
+    return s_output
+
+
 def main():
     print("=" * 60)
     print("后验筛选：生成P_fan分布")
@@ -127,12 +169,16 @@ def main():
     avg_rate = np.mean([info['rate'] for info in week_info])
 
     print(f"   总周数: {n_weeks}")
-    print(f"   争议性周（复现率=0%）: {n_controversial}")
+    print(f"   争议性周（复现率<{CONTROVERSIAL_THRESHOLD*100:.0f}%）: {n_controversial}")
     print(f"   平均复现率: {avg_rate*100:.1f}%")
 
     # 计算筛选后的P_fan分布
     print("\n2. 计算筛选后P_fan分布...")
     pfan_output = compute_filtered_pfan(results, week_valid_samples)
+
+    # 计算筛选后的S分布
+    print("\n3. 计算筛选后S分布...")
+    s_output = compute_filtered_s(results, week_valid_samples)
 
     # 验证一致性（用筛选后样本的均值）
     print("\n3. 验证筛选后一致性...")
@@ -168,18 +214,19 @@ def main():
     print(f"   非争议性周一致性: {correct}/{total} ({correct/total*100:.1f}%)")
 
     # 保存结果
-    print("\n4. 保存结果...")
+    print("\n5. 保存结果...")
     results['pfan_filtered'] = pfan_output
+    results['s_filtered'] = s_output
     results['week_filter_info'] = week_info
     save_data(results, 'outputs/results/results.pkl')
 
     # 输出争议性周列表
     print("\n" + "-" * 60)
-    print("争议性周列表（复现率=0%）:")
+    print(f"争议性周列表（复现率<{CONTROVERSIAL_THRESHOLD*100:.0f}%）:")
     print("-" * 60)
     for info in week_info:
         if info['controversial']:
-            print(f"  Season {info['season']}, Week {info['week']}")
+            print(f"  Season {info['season']}, Week {info['week']}, rate={info['rate']*100:.2f}%")
 
     # 输出P_fan统计
     print("\n" + "-" * 60)
