@@ -21,7 +21,8 @@ model:
     - "industry_Performing Arts & Entertainment"  # 作为参考类别（样本最多51%）
     - is_international  # 与 log_us_state_pop 高度相关 r=-0.988
 
-  # 禁用舞者特征（96.5%方差由性别驱动，个体差异小）
+  # 舞者特征在 X_obs 中（pro_prev_wins, pro_avg_rank, pro_is_male）
+  # X_pro 不存在，此设置无效
   use_pro_features: false
 
   # 名人特征交互项
@@ -52,8 +53,6 @@ model:
 
   # 正则化（交互项多时建议开启）
   use_horseshoe: true  # 开启 Horseshoe，自动稀疏化不重要的交互项
-  horseshoe_tau_scale: 2.0   # 全局收缩τ的先验尺度（越大收缩越弱，默认1.0）
-  horseshoe_c2_scale: 4.0    # Slab方差c²的先验scale（越大允许更大系数，默认1.0）
 
   # 似然函数
   tau_init: 1.0
@@ -81,7 +80,11 @@ model:
   pro_df: null                 # 舞者效应自由度，null 表示学习
 
 prior:
-  sigma_celeb: { a: 2.0, b: 1.0 }
+  # 方案2：收紧名人随机效应先验，迫使模型用特征解释名人差异
+  # InverseGamma(a, b) 均值 = b/(a-1)
+  # 原: a=2, b=1 → 均值=1.0
+  # 新: a=10, b=1 → 均值=0.11
+  sigma_celeb: { a: 10.0, b: 1.0 }
   sigma_pro: { a: 2.0, b: 1.0 }
   sigma_obs: { a: 2.0, b: 1.0 }   # 观测噪声尺度先验
   obs_df_prior: { a: 2.0, b: 0.1 } # 自由度先验 Gamma(2, 0.1)，均值20

@@ -1,10 +1,12 @@
-  3. ❌ 社交媒体热度 → 没有这个特征                                                                                                                
-  4. ❌ 名人粉丝基数 → log_us_state_pop 是弱代理                                                                                                   
-  5. ❌ 当周新闻/话题性 → 无法捕捉                                                                                                                 
-  6. ❌ 投票动员能力 → 无法捕捉 
-
-
-  考虑这些特征
-
-
-  需要交互项
+  静态特征（构建 X_pro 矩阵）：                                                                                                             
+  pro_total_seasons      # 参加过的总赛季数                                                                                                 
+  pro_total_celebs       # 配对过的名人总数                                                                                                 
+  pro_best_placement     # 历史最好名次                                                                                                     
+  pro_win_rate           # 历史胜率（冠军次数/参赛次数）                                                                                    
+  pro_avg_weeks          # 平均每季存活周数                                                                                                 
+  pro_experience_years   # 从业年数（如果有数据）                                                                                           
+                                                                                                                                            
+  动态特征（放在 X_obs 中）：                                                                                                               
+  pro_current_streak     # 当前连续获胜/失败周数                                                                                            
+  pro_season_rank        # 本赛季当前排名                                                                                                   
+  pro_partner_chemistry  # 与当前名人的"化学反应"（可用历史数据估计）

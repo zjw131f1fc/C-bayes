@@ -155,7 +155,9 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
     else:
         delta_raw = delta_sigma * delta_eps
 
-    delta = numpyro.deterministic('delta', delta_raw - jnp.mean(delta_raw))
+    # 舞者效应：不做 sum-to-zero 约束（方案1）
+    # 只对 alpha 做 sum-to-zero，delta 保持自由
+    delta = numpyro.deterministic('delta', delta_raw)
 
     # 线性特征贡献
     if X_lin is not None and X_lin.shape[1] > 0:
@@ -684,6 +686,11 @@ def extract_posterior(config, datas):
 
     if 'tau' in samples:
         datas['posterior_samples']['tau'] = np.array(samples['tau'])
+
+    # Horseshoe 参数
+    for key in ['tau_hs', 'c2_hs', 'lambda_hs', 'beta_raw']:
+        if key in samples:
+            datas['posterior_samples'][key] = np.array(samples[key])
 
     return datas
 
