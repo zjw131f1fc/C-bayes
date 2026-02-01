@@ -172,15 +172,19 @@ def _model_fn(train_data, prior, model_cfg, X_lin, spline_bases, vec_week, celeb
             # Regularized Horseshoe 先验（非中心化参数化）
             # 参考: Piironen & Vehtari (2017), Betancourt (2017)
 
-            # 全局收缩参数 τ
-            tau_hs = numpyro.sample('tau_hs', dist.HalfCauchy(1.0))
+            # 从配置读取Horseshoe参数（可调节收缩强度）
+            tau_scale = model_cfg.get('horseshoe_tau_scale', 1.0)  # 全局收缩尺度
+            c2_scale = model_cfg.get('horseshoe_c2_scale', 1.0)    # Slab方差尺度
+
+            # 全局收缩参数 τ（尺度越大，收缩越弱）
+            tau_hs = numpyro.sample('tau_hs', dist.HalfCauchy(tau_scale))
 
             # 局部收缩参数 λ_j（非中心化）
             lambda_hs_raw = numpyro.sample('lambda_hs_raw', dist.HalfNormal(1.0).expand([n_features]))
             lambda_hs = numpyro.deterministic('lambda_hs', lambda_hs_raw)
 
-            # Slab 方差 c² (限制大系数的最大值)
-            c2_hs = numpyro.sample('c2_hs', dist.InverseGamma(2.0, 1.0))
+            # Slab 方差 c² (限制大系数的最大值，scale越大允许更大系数)
+            c2_hs = numpyro.sample('c2_hs', dist.InverseGamma(2.0, c2_scale))
 
             # Regularized 局部方差: λ̃² = c² * λ² / (c² + τ² * λ²)
             lambda2 = lambda_hs ** 2

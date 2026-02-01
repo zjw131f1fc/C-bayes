@@ -52,6 +52,8 @@ model:
 
   # 正则化（交互项多时建议开启）
   use_horseshoe: true  # 开启 Horseshoe，自动稀疏化不重要的交互项
+  horseshoe_tau_scale: 2.0   # 全局收缩τ的先验尺度（越大收缩越弱，默认1.0）
+  horseshoe_c2_scale: 4.0    # Slab方差c²的先验scale（越大允许更大系数，默认1.0）
 
   # 似然函数
   tau_init: 1.0
