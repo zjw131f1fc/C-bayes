@@ -574,10 +574,23 @@ def build_model(config, datas):
         train_data['judge_rank_score']
     )
 
-    # 更新 train_data 中的 X_celeb（用于模型）
+    # 更新 train_data 中的特征（用于模型和后续分析）
     train_data_updated = dict(train_data)
+    # 名人特征（含交互项、排除后）
     train_data_updated['X_celeb'] = X_celeb
     train_data_updated['X_celeb_names'] = X_celeb_names
+    # 观测特征（含交互项、排除后、可能已中心化）
+    train_data_updated['X_obs'] = X_obs.astype(np.float32)
+    train_data_updated['X_obs_names'] = X_obs_names
+
+    # 保存分离后的线性/样条特征（用于训练对称的线性模型）
+    train_data_updated['X_lin'] = X_lin  # 线性特征矩阵 [n_obs, n_linear_features]
+    train_data_updated['linear_feature_names'] = linear_feature_names
+    train_data_updated['spline_bases'] = spline_bases  # 样条基矩阵列表 [basis_i: [n_obs, n_basis]]
+    train_data_updated['spline_feature_names'] = spline_feature_names
+    train_data_updated['celeb_spline_bases'] = celeb_spline_bases if celeb_spline_bases else None
+    train_data_updated['celeb_spline_feature_names'] = celeb_spline_feature_names
+    train_data_updated['feature_means'] = feature_means  # 中心化均值（如果启用）
 
     return {
         'train_data': train_data_updated,
@@ -804,40 +817,11 @@ def generate_output(config, datas):
     week_idx = td['week_idx']
     n_obs = td['n_obs']
 
-    # 获取观测特征
-    X_obs = td['X_obs'].copy()
-    X_obs_names = list(td['X_obs_names'])
-    X_obs_orig = X_obs.copy()
-    X_obs_names_orig = list(X_obs_names)
-    spline_features = model_cfg['spline_features'] or []
-    exclude_obs = model_cfg.get('exclude_obs_features') or []
-    obs_interaction = model_cfg.get('obs_interaction_features') or []
-    center_features = model_cfg.get('center_features', False)
-
-    # 添加观测特征交互项（在排除之前，使用原始特征）
-    if obs_interaction:
-        for expr in obs_interaction:
-            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
-            X_obs = np.column_stack([X_obs, new_col])
-            X_obs_names.append(new_name)
-
-    # 过滤掉排除的观测特征
-    if exclude_obs:
-        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_obs]
-        X_obs = X_obs[:, keep_cols]
-        X_obs_names = [X_obs_names[i] for i in keep_cols]
-
-    # 使用训练集的均值进行中心化
-    feature_means = datas.get('feature_means')
-    if center_features and feature_means is not None:
-        X_obs = X_obs - feature_means
-
-    spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
-    linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
-    linear_names = [X_obs_names[i] for i in linear_cols]
-    spline_names = [X_obs_names[i] for i in spline_cols]
-
-    X_lin = X_obs[:, linear_cols] if linear_cols else None
+    # 直接使用 train_data 中已处理好的特征（build_model 已处理交互项、排除、中心化）
+    X_lin = td.get('X_lin')
+    linear_names = td.get('linear_feature_names', [])
+    spline_bases = td.get('spline_bases', [])
+    spline_names = td.get('spline_feature_names', [])
 
     alpha_contrib = alpha[celeb_idx]
     delta_contrib = delta[pro_idx]
@@ -853,13 +837,11 @@ def generate_output(config, datas):
     spline_contrib = np.zeros(n_obs, dtype=np.float32)
     spline_details = {}
     spline_coefs = []
-    for i, col in enumerate(spline_cols):
+    for i, basis in enumerate(spline_bases):
         key = f'spline_{i}_coef'
         if key in posterior:
             coef = posterior[key].mean(axis=0)
             spline_coefs.append(coef)
-            basis = _build_spline_basis(X_obs[:, col], model_cfg['n_spline_knots'],
-                                        model_cfg['spline_degree'])
             contrib_i = basis @ coef
             spline_contrib = spline_contrib + contrib_i
             spline_details[f'spline_{spline_names[i]}'] = contrib_i
@@ -931,41 +913,10 @@ def predict(config, train_datas, eval_datas):
     celeb_idx = td['celeb_idx']
     pro_idx = td['pro_idx']
 
-    # 获取观测特征配置
-    X_obs_orig = td['X_obs'].copy()
-    X_obs_names_orig = list(td['X_obs_names'])
-    X_obs = X_obs_orig.copy()
-    X_obs_names = list(X_obs_names_orig)
-    spline_features = model_cfg['spline_features'] or []
-    exclude_obs = model_cfg.get('exclude_obs_features') or []
-    obs_interaction = model_cfg.get('obs_interaction_features') or []
-    center_features = model_cfg.get('center_features', False)
-
-    # 添加观测特征交互项
-    if obs_interaction:
-        for expr in obs_interaction:
-            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
-            X_obs = np.column_stack([X_obs, new_col])
-            X_obs_names.append(new_name)
-
-    # 过滤掉排除的观测特征
-    if exclude_obs:
-        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_obs]
-        X_obs = X_obs[:, keep_cols]
-        X_obs_names = [X_obs_names[i] for i in keep_cols]
-
-    # 使用训练集的均值进行中心化
-    feature_means = train_datas.get('feature_means')
-    if center_features and feature_means is not None:
-        X_obs = X_obs - feature_means
-
-    # 分离线性/样条特征
-    spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
-    linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
-
-    X_lin = X_obs[:, linear_cols] if linear_cols else None
-    spline_bases = [_build_spline_basis(X_obs[:, c], model_cfg['n_spline_knots'],
-                                        model_cfg['spline_degree']) for c in spline_cols]
+    # 直接使用 train_data 中已处理好的特征（build_model 已处理交互项、排除、中心化）
+    X_lin = td.get('X_lin')
+    spline_bases = td.get('spline_bases', [])
+    spline_feature_names = td.get('spline_feature_names', [])
 
     # 对每个后验样本计算 S 和 P_fan
     S_samples = np.zeros((n_samples, n_obs), dtype=np.float32)

@@ -70,8 +70,8 @@ model:
   sum_to_zero: true
 
   # 观测级噪声（Student-t 分布）
-  obs_noise: false          # 是否启用观测级噪声
-  obs_noise_df: null        # 自由度，null 表示学习
+  obs_noise: true           # 启用观测级噪声，V ~ StudentT(df, mu, sigma)
+  obs_noise_df: null        # 自由度，null 表示从数据学习
 
   # 名人/舞者效应使用 Student-t 分布
   use_student_t_effects: false # 是否对 alpha/delta 使用 Student-t

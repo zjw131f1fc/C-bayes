@@ -22,6 +22,8 @@ from src.visualize import visualize_diagnostics
 def run_single(config, datas):
     """单次训练（使用全部数据）"""
     model = build_model(config, datas)
+    # 将处理后的特征（含交互项）同步回 datas
+    datas['train_data'] = model['train_data']
     datas = train(config, model, datas)
     datas = extract_posterior(config, datas)
     datas = predict(config, datas, datas)  # eval_datas = train_datas
@@ -46,6 +48,8 @@ def run_cv(config, datas):
         # 训练
         print("  [DEBUG] build_model...")
         model = build_model(config, train_datas)
+        # 将处理后的特征（含交互项）同步回 train_datas
+        train_datas['train_data'] = model['train_data']
         print("  [DEBUG] train...")
         train_datas = train(config, model, train_datas)
         print("  [DEBUG] extract_posterior...")

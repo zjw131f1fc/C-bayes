@@ -23,8 +23,6 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx=None, output
     Args:
         fold_idx: 折索引，None 表示全量训练（文件名不加 fold 标识）
     """
-    from src.model import _parse_interaction
-
     os.makedirs(output_dir, exist_ok=True)
 
     # 文件名前缀
@@ -39,36 +37,11 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx=None, output
     td_test = test_datas['train_data']
     model_cfg = config['model']
 
-    # 获取观测特征配置
-    X_obs_names_orig = list(td_train['X_obs_names'])
-    X_obs_orig = td_train['X_obs'].copy()
-    X_obs_names = list(X_obs_names_orig)
-    X_obs_train = X_obs_orig.copy()
-    spline_features = model_cfg['spline_features'] or []
-    exclude_obs = model_cfg.get('exclude_obs_features') or []
-    obs_interaction = model_cfg.get('obs_interaction_features') or []
-    center_features = model_cfg.get('center_features', False)
-
-    # 添加观测特征交互项
-    if obs_interaction:
-        for expr in obs_interaction:
-            new_col, new_name = _parse_interaction(expr, X_obs_orig, X_obs_names_orig)
-            X_obs_train = np.column_stack([X_obs_train, new_col])
-            X_obs_names.append(new_name)
-
-    # 过滤掉排除的观测特征
-    if exclude_obs:
-        keep_cols = [i for i, name in enumerate(X_obs_names) if name not in exclude_obs]
-        X_obs_train = X_obs_train[:, keep_cols]
-        X_obs_names = [X_obs_names[i] for i in keep_cols]
-
-    # 使用训练集的均值进行中心化
-    feature_means = train_datas.get('feature_means')
-    if center_features and feature_means is not None:
-        X_obs_train = X_obs_train - feature_means
-
-    spline_cols = [i for i, name in enumerate(X_obs_names) if name in spline_features]
-    linear_cols = [i for i, name in enumerate(X_obs_names) if name not in spline_features]
+    # 直接使用 train_data 中已处理好的特征（build_model 已处理交互项、排除、中心化）
+    X_lin = td_train.get('X_lin')
+    linear_names = td_train.get('linear_feature_names', [])
+    spline_bases = td_train.get('spline_bases', [])
+    spline_names = td_train.get('spline_feature_names', [])
 
     # === 图1: 各部分贡献的分布 ===
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -80,19 +53,16 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx=None, output
     alpha_contrib = alpha_mean[td_train['celeb_idx']]
     delta_contrib = delta_mean[td_train['pro_idx']]
 
-    X_lin = X_obs_train[:, linear_cols] if linear_cols else None
     linear_contrib = np.zeros(td_train['n_obs'])
     if X_lin is not None and 'beta_obs' in posterior:
         beta_obs = posterior['beta_obs'].mean(axis=0)
         linear_contrib = X_lin @ beta_obs
 
     spline_contrib = np.zeros(td_train['n_obs'])
-    for i, col in enumerate(spline_cols):
+    for i, basis in enumerate(spline_bases):
         key = f'spline_{i}_coef'
         if key in posterior:
             coef = posterior[key].mean(axis=0)
-            basis = _build_spline_basis(X_obs_train[:, col],
-                                        model_cfg['n_spline_knots'], model_cfg['spline_degree'])
             spline_contrib += basis @ coef
 
     # 绘制各部分贡献的直方图
@@ -117,20 +87,27 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx=None, output
     plt.close()
 
     # === 图2: 样条特征的非线性关系 ===
-    n_spline = len(spline_cols)
+    # 获取原始特征值用于绘图（从 X_obs 中提取样条特征列）
+    X_obs = td_train['X_obs']
+    X_obs_names = td_train['X_obs_names']
+
+    n_spline = len(spline_bases)
     if n_spline > 0:
         fig, axes = plt.subplots(1, n_spline, figsize=(6*n_spline, 5))
         if n_spline == 1:
             axes = [axes]
 
-        for i, col in enumerate(spline_cols):
-            feature_name = X_obs_names[col]
-            x_vals = X_obs_train[:, col]
+        for i, (basis, feature_name) in enumerate(zip(spline_bases, spline_names)):
+            # 从 X_obs 中找到对应的原始特征列
+            if feature_name in X_obs_names:
+                col_idx = X_obs_names.index(feature_name)
+                x_vals = X_obs[:, col_idx]
+            else:
+                x_vals = np.arange(len(basis))  # fallback
 
             key = f'spline_{i}_coef'
             if key in posterior:
                 coef = posterior[key].mean(axis=0)
-                basis = _build_spline_basis(x_vals, model_cfg['n_spline_knots'], model_cfg['spline_degree'])
                 y_spline = basis @ coef
 
                 sort_idx = np.argsort(x_vals)
@@ -149,35 +126,37 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx=None, output
     # === 图3: 特征与mu的关系（检测遗漏的非线性） ===
     mu = alpha_contrib + delta_contrib + linear_contrib + spline_contrib
 
-    n_features = len(X_obs_names)
-    n_cols = min(3, n_features)
-    n_rows = (n_features + n_cols - 1) // n_cols
+    # 使用线性特征绘图
+    n_features = len(linear_names)
+    if n_features > 0 and X_lin is not None:
+        n_cols = min(3, n_features)
+        n_rows = (n_features + n_cols - 1) // n_cols
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows))
-    axes = np.atleast_2d(axes).flatten()
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows))
+        axes = np.atleast_2d(axes).flatten()
 
-    for i, name in enumerate(X_obs_names):
-        x_vals = X_obs_train[:, i]
-        axes[i].scatter(x_vals, mu, alpha=0.3, s=10)
-        axes[i].set_xlabel(name, fontsize=11)
-        axes[i].set_ylabel('mu', fontsize=11)
-        axes[i].set_title(f'{name} vs mu', fontsize=12)
+        for i, name in enumerate(linear_names):
+            x_vals = X_lin[:, i]
+            axes[i].scatter(x_vals, mu, alpha=0.3, s=10)
+            axes[i].set_xlabel(name, fontsize=11)
+            axes[i].set_ylabel('mu', fontsize=11)
+            axes[i].set_title(f'{name} vs mu', fontsize=12)
 
-        try:
-            sort_idx = np.argsort(x_vals)
-            window = max(len(x_vals) // 20, 5)
-            smoothed = uniform_filter1d(mu[sort_idx].astype(float), size=window)
-            axes[i].plot(x_vals[sort_idx], smoothed, 'r-', lw=2, alpha=0.7, label='Trend')
-            axes[i].legend()
-        except:
-            pass
+            try:
+                sort_idx = np.argsort(x_vals)
+                window = max(len(x_vals) // 20, 5)
+                smoothed = uniform_filter1d(mu[sort_idx].astype(float), size=window)
+                axes[i].plot(x_vals[sort_idx], smoothed, 'r-', lw=2, alpha=0.7, label='Trend')
+                axes[i].legend()
+            except:
+                pass
 
-    for i in range(n_features, len(axes)):
-        axes[i].set_visible(False)
+        for i in range(n_features, len(axes)):
+            axes[i].set_visible(False)
 
-    plt.tight_layout()
-    plt.savefig(f'{output_dir}/{prefix}feature_vs_mu.png', dpi=150)
-    plt.close()
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}/{prefix}feature_vs_mu.png', dpi=150)
+        plt.close()
 
     # === 图4: 测试集预测残差分析 ===
     S_samples = test_datas['S_samples']
@@ -227,8 +206,8 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx=None, output
     plt.close()
 
     # === 图5: 线性特征的效应 ===
-    if linear_cols:
-        n_lin = len(linear_cols)
+    if linear_names and len(linear_names) > 0:
+        n_lin = len(linear_names)
         n_cols_plot = min(3, n_lin)
         n_rows_plot = (n_lin + n_cols_plot - 1) // n_cols_plot
         fig, axes = plt.subplots(n_rows_plot, n_cols_plot, figsize=(5*n_cols_plot, 4*n_rows_plot))
@@ -236,8 +215,7 @@ def visualize_diagnostics(config, train_datas, test_datas, fold_idx=None, output
 
         if 'beta_obs' in posterior:
             beta_samples = posterior['beta_obs']
-            for i, col in enumerate(linear_cols):
-                name = X_obs_names[col]
+            for i, name in enumerate(linear_names):
                 beta_i = beta_samples[:, i]
                 axes[i].hist(beta_i, bins=30, alpha=0.7, edgecolor='black')
                 axes[i].axvline(x=0, color='red', linestyle='--')
