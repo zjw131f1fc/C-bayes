@@ -273,6 +273,56 @@ def normalize_judge_score_weekly(datas):
     return datas
 
 
+def add_placement_feature(datas):
+    """
+    Add placement (final rank) as an observation-level feature.
+
+    Placement is the final rank of the celebrity in that season.
+    Lower placement = better (1 = winner).
+
+    We normalize it within each season to [0, 1] range:
+    - placement_norm = (placement - 1) / (n_contestants - 1)
+    - Winner (rank 1) -> 0, Last place -> 1
+
+    This way, higher placement_norm means worse performance,
+    which should correlate with lower P_fan.
+    """
+    td = datas['train_data']
+    n_obs = td['n_obs']
+
+    # Create observation-level placement feature
+    placement_raw = np.zeros(n_obs, dtype=np.float32)
+    placement_norm = np.zeros(n_obs, dtype=np.float32)
+
+    for i in range(n_obs):
+        season = td['season_idx'][i]
+        celeb = td['celeb_idx'][i]
+        placement_raw[i] = td['placement'][season][celeb]
+
+    # Normalize within each season
+    for season in range(td['n_seasons']):
+        season_mask = td['season_idx'] == season
+        season_placements = placement_raw[season_mask]
+
+        if len(season_placements) > 0:
+            n_contestants = int(season_placements.max())  # max placement = n_contestants
+            if n_contestants > 1:
+                # (placement - 1) / (n - 1): rank 1 -> 0, rank n -> 1
+                placement_norm[season_mask] = (season_placements - 1) / (n_contestants - 1)
+            else:
+                placement_norm[season_mask] = 0.0
+
+    # Add to X_obs
+    td['X_obs'] = np.column_stack([td['X_obs'], placement_norm.astype(np.float32)])
+    td['X_obs_names'].append('placement_norm')
+
+    print(f"  [add_placement_feature] Added placement_norm feature")
+    print(f"    Raw placement: mean={placement_raw.mean():.2f}, std={placement_raw.std():.2f}")
+    print(f"    Normalized: mean={placement_norm.mean():.3f}, std={placement_norm.std():.3f}")
+
+    return datas
+
+
 def filter_data(datas, test_season):
     """
     按赛季划分数据

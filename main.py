@@ -14,7 +14,7 @@ import numpyro
 numpyro.set_host_device_count(4)  # CPU 上模拟多设备以支持多链并行
 
 from src.utils import load_config, save_data
-from src.preprocess import load_mock_data, load_data, validate_data, filter_data, normalize_judge_score_weekly
+from src.preprocess import load_mock_data, load_data, validate_data, filter_data, normalize_judge_score_weekly, add_placement_feature
 from src.model import build_model, train, extract_posterior, compute_metrics, generate_output, predict
 from src.visualize import visualize_diagnostics
 
@@ -95,6 +95,9 @@ if __name__ == "__main__":
 
     # 周内标准化评委分（替换 judge_score_season_zscore）
     datas = normalize_judge_score_weekly(datas)
+
+    # 添加 placement 特征（最终名次）
+    datas = add_placement_feature(datas)
 
     # 1. 全量训练（在整个数据集上训练并验证）
     print("\n=== 全量训练 ===")
