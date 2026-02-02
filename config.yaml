@@ -14,7 +14,7 @@ model:
   # 排除的观测特征（减少共线性）
   exclude_obs_features:
     - youtube_comment_count_norm  # 与 youtube_view_count_norm 高度相关 r=0.96
-    # - pro_is_male               # 与 is_male 高度相关 r=-0.89（但可能有独立效应）
+    - pro_is_male                 # 与 is_male 高度相关 r=-0.89
 
   # 排除的名人特征（解决多重共线性）
   exclude_celeb_features:
@@ -61,7 +61,7 @@ model:
   # P_fan 归一化方式
   p_fan_normalize: softmax  # 'linear' or 'softmax'
   t_fan_init: 2.0           # softmax 温度参数（高温度 → 更平滑，保留小值差异）
-  learn_t_fan: false        # 是否学习温度参数
+  learn_t_fan: true         # 是否学习温度参数
 
   # 评委拯救修正
   use_judge_save_correction: true  # 是否启用评委拯救修正
