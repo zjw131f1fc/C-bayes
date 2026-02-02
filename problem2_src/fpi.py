@@ -1,15 +1,23 @@
 """
 粉丝权力指数 (Fan Power Index, FPI) 计算和可视化
 
-FPI = Var(S_fan) / Var(S_total)
+FPI = rho²(S_total, S_fan) / [rho²(S_total, S_fan) + rho²(S_total, S_judge)]
 
-- 百分比法: S_fan = P_fan, S_judge = judge_score_pct
-- 排名法: S_fan = R_fan (粉丝排名分), S_judge = judge_rank_score
+其中 rho 为 Spearman 秩相关系数。
+
+- FPI > 0.5: 粉丝投票对最终排名的影响更大
+- FPI = 0.5: 均衡点，两者影响力相当
+- FPI < 0.5: 评委分数对最终排名的影响更大
+
+两种计分方法:
+- 百分比法: S_total = P_fan + judge_pct_normalized
+- 排名法: S_total = R_fan + judge_rank_score
 """
 
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.stats import spearmanr
 
 
 def setup_plot_style():
@@ -23,10 +31,16 @@ def compute_fpi_both_methods(datas):
     """
     对每周，分别用排名法和百分比法计算 FPI
 
-    FPI = Var(S_fan) / Var(S_total)
+    FPI = rho²(S_total, S_fan) / [rho²(S_total, S_fan) + rho²(S_total, S_judge)]
 
-    百分比法: S_fan = P_fan, S_judge = judge_score_pct, S_total = S_fan + S_judge
-    排名法: S_fan = R_fan, S_judge = judge_rank_score, S_total = S_fan + S_judge
+    其中 rho 为 Spearman 秩相关系数。
+
+    - FPI > 0.5: 粉丝投票对最终排名的影响更大
+    - FPI = 0.5: 均衡点
+    - FPI < 0.5: 评委分数对最终排名的影响更大
+
+    百分比法: S_total = P_fan + judge_pct_normalized
+    排名法: S_total = R_fan + judge_rank_score
 
     优先使用筛选后的后验数据 (pfan_filtered)，如果不存在则回退到 P_fan_samples 的均值
 
@@ -54,7 +68,8 @@ def compute_fpi_both_methods(datas):
         season = wd['season']
         week = wd['week']
 
-        if n_contestants < 2:
+        # 需要至少3个选手才能计算有意义的相关系数
+        if n_contestants < 3:
             continue
 
         # 获取该周的数据
@@ -72,34 +87,44 @@ def compute_fpi_both_methods(datas):
         S_fan_pct = P_fan
         S_total_pct = S_fan_pct + S_judge_pct
 
-        var_fan_pct = np.var(S_fan_pct)
-        var_total_pct = np.var(S_total_pct)
-
-        if var_total_pct > 1e-10:
-            fpi_pct = var_fan_pct / var_total_pct
-        else:
+        # 计算 Spearman 相关系数
+        # 检查是否有常数输入（方差为0）
+        if np.std(S_total_pct) < 1e-10 or np.std(S_fan_pct) < 1e-10 or np.std(S_judge_pct) < 1e-10:
             fpi_pct = np.nan
+        else:
+            rho_fan_pct = spearmanr(S_total_pct, S_fan_pct)[0]
+            rho_judge_pct = spearmanr(S_total_pct, S_judge_pct)[0]
+            # 使用 rho² 计算 FPI
+            rho2_fan = rho_fan_pct ** 2
+            rho2_judge = rho_judge_pct ** 2
+            if rho2_fan + rho2_judge > 1e-10:
+                fpi_pct = rho2_fan / (rho2_fan + rho2_judge)
+            else:
+                fpi_pct = 0.5  # 两者都接近0时，认为均衡
 
         # === 排名法 ===
         # 计算粉丝排名分 R_fan (软排名)
-        if n_contestants > 1:
-            diff = P_fan[:, None] - P_fan[None, :]
-            soft_rank = np.sum(1 / (1 + np.exp(-diff / 0.1)), axis=1) - 0.5
-            R_fan = soft_rank / (n_contestants - 1)
-        else:
-            R_fan = np.array([0.5], dtype=np.float32)
+        diff = P_fan[:, None] - P_fan[None, :]
+        soft_rank = np.sum(1 / (1 + np.exp(-diff / 0.1)), axis=1) - 0.5
+        R_fan = soft_rank / (n_contestants - 1)
 
         S_fan_rank = R_fan
         S_judge_rank = judge_rank_score
         S_total_rank = S_fan_rank + S_judge_rank
 
-        var_fan_rank = np.var(S_fan_rank)
-        var_total_rank = np.var(S_total_rank)
-
-        if var_total_rank > 1e-10:
-            fpi_rank = var_fan_rank / var_total_rank
-        else:
+        # 计算 Spearman 相关系数
+        if np.std(S_total_rank) < 1e-10 or np.std(S_fan_rank) < 1e-10 or np.std(S_judge_rank) < 1e-10:
             fpi_rank = np.nan
+        else:
+            rho_fan_rank = spearmanr(S_total_rank, S_fan_rank)[0]
+            rho_judge_rank = spearmanr(S_total_rank, S_judge_rank)[0]
+            # 使用 rho² 计算 FPI
+            rho2_fan = rho_fan_rank ** 2
+            rho2_judge = rho_judge_rank ** 2
+            if rho2_fan + rho2_judge > 1e-10:
+                fpi_rank = rho2_fan / (rho2_fan + rho2_judge)
+            else:
+                fpi_rank = 0.5
 
         # 由于使用均值而非样本，标准差设为0
         fpi_data.append({
@@ -449,12 +474,14 @@ def print_fpi_summary(fpi_data):
 
 def compute_variance_decomposition(datas):
     """
-    计算每周的方差分解
+    计算每周的 FPI 分解（用于 power shift 图）
+
+    使用 rho² 方法计算粉丝和评委对最终排名的相对影响力
 
     优先使用筛选后的后验数据 (pfan_filtered)，如果不存在则回退到 P_fan_samples 的均值
 
     返回:
-        list of dict: 每周的方差分解数据
+        list of dict: 每周的 FPI 分解数据
     """
     td = datas['train_data']
     week_data = td['week_data']
@@ -462,11 +489,11 @@ def compute_variance_decomposition(datas):
     # 优先使用筛选后的后验均值，否则回退到 P_fan_samples 的均值
     if 'pfan_filtered' in datas and 'mean' in datas['pfan_filtered']:
         P_fan_mean = datas['pfan_filtered']['mean']  # [n_obs]
-        print("  Using pfan_filtered['mean'] for variance decomposition")
+        print("  Using pfan_filtered['mean'] for FPI decomposition")
     else:
         P_fan_samples = datas['P_fan_samples']
         P_fan_mean = P_fan_samples.mean(axis=0)
-        print("  Fallback: Using P_fan_samples mean for variance decomposition")
+        print("  Fallback: Using P_fan_samples mean for FPI decomposition")
 
     results = []
 
@@ -475,7 +502,7 @@ def compute_variance_decomposition(datas):
         indices = np.where(mask)[0]
         n_contestants = len(indices)
 
-        if n_contestants < 2:
+        if n_contestants < 3:
             continue
 
         season = wd['season']
@@ -486,82 +513,99 @@ def compute_variance_decomposition(datas):
         P_fan = P_fan_mean[mask]
 
         # === 百分比法 ===
-        # 将 judge_score_pct 归一化为周内和=1，与 P_fan (softmax) 尺度一致
         judge_sum = judge_pct_raw.sum()
         if judge_sum > 1e-10:
             judge_pct = judge_pct_raw / judge_sum
         else:
             judge_pct = np.ones(n_contestants) / n_contestants
-        var_judge_pct = np.var(judge_pct)
-        var_fan_pct = np.var(P_fan)
-        var_total_pct = np.var(judge_pct + P_fan)
+
+        S_total_pct = P_fan + judge_pct
+
+        # 计算 rho²
+        if np.std(S_total_pct) < 1e-10 or np.std(P_fan) < 1e-10 or np.std(judge_pct) < 1e-10:
+            rho2_fan_pct = 0.5
+            rho2_judge_pct = 0.5
+        else:
+            rho_fan_pct = spearmanr(S_total_pct, P_fan)[0]
+            rho_judge_pct = spearmanr(S_total_pct, judge_pct)[0]
+            rho2_fan_pct = rho_fan_pct ** 2
+            rho2_judge_pct = rho_judge_pct ** 2
 
         # === 排名法 ===
         diff_mat = P_fan[:, None] - P_fan[None, :]
         soft_rank = np.sum(1 / (1 + np.exp(-diff_mat / 0.1)), axis=1) - 0.5
-        R_fan = soft_rank / (n_contestants - 1) if n_contestants > 1 else np.array([0.5])
+        R_fan = soft_rank / (n_contestants - 1)
 
-        var_judge_rank = np.var(judge_rank)
-        var_fan_rank = np.var(R_fan)
-        var_total_rank = np.var(judge_rank + R_fan)
+        S_total_rank = R_fan + judge_rank
+
+        if np.std(S_total_rank) < 1e-10 or np.std(R_fan) < 1e-10 or np.std(judge_rank) < 1e-10:
+            rho2_fan_rank = 0.5
+            rho2_judge_rank = 0.5
+        else:
+            rho_fan_rank = spearmanr(S_total_rank, R_fan)[0]
+            rho_judge_rank = spearmanr(S_total_rank, judge_rank)[0]
+            rho2_fan_rank = rho_fan_rank ** 2
+            rho2_judge_rank = rho_judge_rank ** 2
 
         results.append({
             'season': season,
             'week': week,
             'n_contestants': n_contestants,
-            'var_judge_pct': var_judge_pct,
-            'var_fan_pct': var_fan_pct,
-            'var_total_pct': var_total_pct,
-            'var_judge_rank': var_judge_rank,
-            'var_fan_rank': var_fan_rank,
-            'var_total_rank': var_total_rank,
+            'rho2_judge_pct': rho2_judge_pct,
+            'rho2_fan_pct': rho2_fan_pct,
+            'rho2_judge_rank': rho2_judge_rank,
+            'rho2_fan_rank': rho2_fan_rank,
         })
 
     return results
 
 
-def plot_power_shift(var_data, output_dir):
+def plot_power_shift(fpi_decomp_data, output_dir):
     """
     影响力演变图 (Power Shift Plot)
-    堆叠面积图展示评委分和粉丝分的方差占比
+    堆叠面积图展示评委分和粉丝分对排名的相对影响力 (基于 rho²)
+
+    FPI = rho²_fan / (rho²_fan + rho²_judge)
+    - FPI > 0.5: 粉丝影响力更大
+    - FPI < 0.5: 评委影响力更大
     """
     setup_plot_style()
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     # 按赛季分组
-    season_var = {}
-    for d in var_data:
+    season_fpi = {}
+    for d in fpi_decomp_data:
         s = d['season']
-        if s not in season_var:
-            season_var[s] = {'judge_pct': [], 'fan_pct': [], 'judge_rank': [], 'fan_rank': []}
+        if s not in season_fpi:
+            season_fpi[s] = {'judge_pct': [], 'fan_pct': [], 'judge_rank': [], 'fan_rank': []}
 
-        # 归一化
-        total_pct = d['var_judge_pct'] + d['var_fan_pct']
-        total_rank = d['var_judge_rank'] + d['var_fan_rank']
+        # 归一化为占比
+        total_pct = d['rho2_judge_pct'] + d['rho2_fan_pct']
+        total_rank = d['rho2_judge_rank'] + d['rho2_fan_rank']
 
         if total_pct > 1e-10:
-            season_var[s]['judge_pct'].append(d['var_judge_pct'] / total_pct)
-            season_var[s]['fan_pct'].append(d['var_fan_pct'] / total_pct)
+            season_fpi[s]['judge_pct'].append(d['rho2_judge_pct'] / total_pct)
+            season_fpi[s]['fan_pct'].append(d['rho2_fan_pct'] / total_pct)
         if total_rank > 1e-10:
-            season_var[s]['judge_rank'].append(d['var_judge_rank'] / total_rank)
-            season_var[s]['fan_rank'].append(d['var_fan_rank'] / total_rank)
+            season_fpi[s]['judge_rank'].append(d['rho2_judge_rank'] / total_rank)
+            season_fpi[s]['fan_rank'].append(d['rho2_fan_rank'] / total_rank)
 
-    seasons = sorted(season_var.keys())
-    judge_pct_avg = [np.mean(season_var[s]['judge_pct']) if season_var[s]['judge_pct'] else 0.5 for s in seasons]
-    fan_pct_avg = [np.mean(season_var[s]['fan_pct']) if season_var[s]['fan_pct'] else 0.5 for s in seasons]
-    judge_rank_avg = [np.mean(season_var[s]['judge_rank']) if season_var[s]['judge_rank'] else 0.5 for s in seasons]
-    fan_rank_avg = [np.mean(season_var[s]['fan_rank']) if season_var[s]['fan_rank'] else 0.5 for s in seasons]
+    seasons = sorted(season_fpi.keys())
+    judge_pct_avg = [np.mean(season_fpi[s]['judge_pct']) if season_fpi[s]['judge_pct'] else 0.5 for s in seasons]
+    fan_pct_avg = [np.mean(season_fpi[s]['fan_pct']) if season_fpi[s]['fan_pct'] else 0.5 for s in seasons]
+    judge_rank_avg = [np.mean(season_fpi[s]['judge_rank']) if season_fpi[s]['judge_rank'] else 0.5 for s in seasons]
+    fan_rank_avg = [np.mean(season_fpi[s]['fan_rank']) if season_fpi[s]['fan_rank'] else 0.5 for s in seasons]
 
     # 左图：百分比法
     ax1 = axes[0]
     ax1.stackplot(seasons, [judge_pct_avg, fan_pct_avg],
-                  labels=['Judge Variance', 'Fan Variance'],
+                  labels=['Judge Influence', 'Fan Influence'],
                   colors=['#3498DB', '#E74C3C'], alpha=0.8)
     ax1.axhline(y=0.5, color='white', linestyle='--', linewidth=2, alpha=0.8)
     ax1.set_xlabel('Season', fontsize=12)
-    ax1.set_ylabel('Variance Share', fontsize=12)
-    ax1.set_title('Percentage Method\n(Fan power can dominate)', fontsize=13)
+    ax1.set_ylabel('Relative Influence (FPI)', fontsize=12)
+    ax1.set_title('Percentage Method\n(Fan votes dominate)', fontsize=13)
     ax1.legend(loc='upper right')
     ax1.set_ylim(0, 1)
     ax1.set_xlim(seasons[0], seasons[-1])
@@ -569,12 +613,12 @@ def plot_power_shift(var_data, output_dir):
     # 右图：排名法
     ax2 = axes[1]
     ax2.stackplot(seasons, [judge_rank_avg, fan_rank_avg],
-                  labels=['Judge Variance', 'Fan Variance'],
+                  labels=['Judge Influence', 'Fan Influence'],
                   colors=['#3498DB', '#E74C3C'], alpha=0.8)
     ax2.axhline(y=0.5, color='white', linestyle='--', linewidth=2, alpha=0.8)
     ax2.set_xlabel('Season', fontsize=12)
-    ax2.set_ylabel('Variance Share', fontsize=12)
-    ax2.set_title('Ranking Method\n(More balanced power)', fontsize=13)
+    ax2.set_ylabel('Relative Influence (FPI)', fontsize=12)
+    ax2.set_title('Ranking Method\n(Judge scores dominate)', fontsize=13)
     ax2.legend(loc='upper right')
     ax2.set_ylim(0, 1)
     ax2.set_xlim(seasons[0], seasons[-1])
