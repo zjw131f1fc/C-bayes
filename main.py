@@ -16,7 +16,7 @@ numpyro.set_host_device_count(4)  # CPU 上模拟多设备以支持多链并行
 from src.utils import load_config, save_data
 from src.preprocess import load_mock_data, load_data, validate_data, filter_data, normalize_judge_score_weekly, add_placement_feature
 from src.model import build_model, train, extract_posterior, compute_metrics, generate_output, predict
-from src.visualize import visualize_diagnostics
+from src.visualize import visualize_diagnostics, compute_mcmc_diagnostics, print_rhat_summary, plot_rhat_histogram
 
 
 def run_single(config, datas):
@@ -106,7 +106,15 @@ if __name__ == "__main__":
     # 2. 诊断可视化
     visualize_diagnostics(config, datas, datas)
 
-    # 3. 保存结果
+    # 3. Gelman-Rubin 诊断
+    print("\n=== MCMC 收敛诊断 ===")
+    n_chains = config['sampling']['n_chains']
+    diagnostics = compute_mcmc_diagnostics(datas['trace'], n_chains)
+    print_rhat_summary(diagnostics)
+    plot_rhat_histogram(diagnostics, 'outputs/model')
+    datas['mcmc_diagnostics'] = diagnostics
+
+    # 4. 保存结果
     save_data(datas, 'outputs/results/results.pkl')
     print("结果已保存到 outputs/results/results.pkl")
 

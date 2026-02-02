@@ -7,6 +7,156 @@ from scipy.ndimage import uniform_filter1d
 from patsy import dmatrix
 
 
+def compute_rhat(samples):
+    """计算 Gelman-Rubin R-hat 统计量
+
+    Args:
+        samples: shape [n_chains, n_samples] 或 [n_chains, n_samples, n_params]
+
+    Returns:
+        R-hat 值（标量或数组）
+    """
+    if samples.ndim == 2:
+        # [n_chains, n_samples] -> 单个参数
+        n_chains, n_samples = samples.shape
+        chain_means = samples.mean(axis=1)  # [n_chains]
+        chain_vars = samples.var(axis=1, ddof=1)  # [n_chains]
+
+        # 链间方差 B
+        B = n_samples * np.var(chain_means, ddof=1)
+        # 链内方差 W
+        W = np.mean(chain_vars)
+
+        # 后验方差估计
+        var_hat = (n_samples - 1) / n_samples * W + B / n_samples
+        # R-hat
+        rhat = np.sqrt(var_hat / W) if W > 1e-10 else 1.0
+        return rhat
+
+    elif samples.ndim == 3:
+        # [n_chains, n_samples, n_params] -> 多个参数
+        n_chains, n_samples, n_params = samples.shape
+        rhats = np.zeros(n_params)
+        for i in range(n_params):
+            rhats[i] = compute_rhat(samples[:, :, i])
+        return rhats
+
+    else:
+        raise ValueError(f"samples must be 2D or 3D, got {samples.ndim}D")
+
+
+def compute_mcmc_diagnostics(trace, n_chains):
+    """计算 MCMC 诊断统计量
+
+    Args:
+        trace: dict, 后验样本 {param_name: samples}，samples shape [n_total_samples, ...]
+        n_chains: int, 链数
+
+    Returns:
+        dict: 诊断结果
+    """
+    diagnostics = {}
+
+    for param_name, samples in trace.items():
+        if param_name in ['P_fan', 'S']:  # 跳过确定性变量
+            continue
+
+        n_total = samples.shape[0]
+        n_samples_per_chain = n_total // n_chains
+
+        if n_samples_per_chain < 10:
+            continue
+
+        # 重塑为 [n_chains, n_samples_per_chain, ...]
+        if samples.ndim == 1:
+            # 标量参数
+            samples_reshaped = samples[:n_chains * n_samples_per_chain].reshape(n_chains, n_samples_per_chain)
+            rhat = compute_rhat(samples_reshaped)
+            diagnostics[param_name] = {
+                'rhat': rhat,
+                'mean': samples.mean(),
+                'std': samples.std(),
+            }
+        elif samples.ndim == 2:
+            # 向量参数 [n_total, n_params]
+            n_params = samples.shape[1]
+            samples_reshaped = samples[:n_chains * n_samples_per_chain].reshape(n_chains, n_samples_per_chain, n_params)
+            rhats = compute_rhat(samples_reshaped)
+            diagnostics[param_name] = {
+                'rhat': rhats,
+                'rhat_max': rhats.max(),
+                'rhat_mean': rhats.mean(),
+                'mean': samples.mean(axis=0),
+                'std': samples.std(axis=0),
+            }
+
+    return diagnostics
+
+
+def print_rhat_summary(diagnostics):
+    """打印 R-hat 诊断摘要"""
+    print("\n" + "=" * 60)
+    print("Gelman-Rubin Diagnostic (R-hat)")
+    print("=" * 60)
+    print("R-hat < 1.01: Excellent convergence")
+    print("R-hat < 1.05: Good convergence")
+    print("R-hat < 1.10: Acceptable convergence")
+    print("R-hat > 1.10: Poor convergence (consider more samples)")
+    print("-" * 60)
+
+    # 收集所有 R-hat 值
+    all_rhats = []
+    for param_name, diag in diagnostics.items():
+        rhat = diag['rhat']
+        if np.isscalar(rhat):
+            all_rhats.append(rhat)
+            status = "OK" if rhat < 1.05 else ("WARN" if rhat < 1.10 else "BAD")
+            print(f"{param_name:30s}: R-hat = {rhat:.4f} [{status}]")
+        else:
+            all_rhats.extend(rhat.flatten())
+            rhat_max = diag['rhat_max']
+            rhat_mean = diag['rhat_mean']
+            status = "OK" if rhat_max < 1.05 else ("WARN" if rhat_max < 1.10 else "BAD")
+            print(f"{param_name:30s}: R-hat max = {rhat_max:.4f}, mean = {rhat_mean:.4f} [{status}]")
+
+    print("-" * 60)
+    all_rhats = np.array(all_rhats)
+    print(f"{'Overall':30s}: max = {all_rhats.max():.4f}, mean = {all_rhats.mean():.4f}")
+    print(f"{'Parameters with R-hat > 1.05':30s}: {(all_rhats > 1.05).sum()} / {len(all_rhats)}")
+    print(f"{'Parameters with R-hat > 1.10':30s}: {(all_rhats > 1.10).sum()} / {len(all_rhats)}")
+    print("=" * 60)
+
+    return all_rhats
+
+
+def plot_rhat_histogram(diagnostics, output_dir):
+    """绘制 R-hat 直方图"""
+    all_rhats = []
+    for param_name, diag in diagnostics.items():
+        rhat = diag['rhat']
+        if np.isscalar(rhat):
+            all_rhats.append(rhat)
+        else:
+            all_rhats.extend(rhat.flatten())
+
+    all_rhats = np.array(all_rhats)
+
+    plt.figure(figsize=(10, 6))
+    plt.hist(all_rhats, bins=50, edgecolor='black', alpha=0.7)
+    plt.axvline(x=1.0, color='green', linestyle='-', linewidth=2, label='R-hat = 1.0 (ideal)')
+    plt.axvline(x=1.05, color='orange', linestyle='--', linewidth=2, label='R-hat = 1.05 (good)')
+    plt.axvline(x=1.10, color='red', linestyle='--', linewidth=2, label='R-hat = 1.10 (threshold)')
+    plt.xlabel('R-hat', fontsize=12)
+    plt.ylabel('Count', fontsize=12)
+    plt.title(f'Gelman-Rubin R-hat Distribution\n(n={len(all_rhats)}, max={all_rhats.max():.4f})', fontsize=14)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/rhat_histogram.png', dpi=150)
+    plt.close()
+    print(f"Saved: {output_dir}/rhat_histogram.png")
+
+
 def _build_spline_basis(x, n_knots, degree):
     """构建B样条基矩阵"""
     knots = np.linspace(x.min(), x.max(), n_knots)
