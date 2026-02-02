@@ -58,13 +58,18 @@ def compute_fpi_both_methods(datas):
             continue
 
         # 获取该周的数据
-        judge_score_pct = td['judge_score_pct'][mask]  # [n_contestants]
+        judge_score_pct_raw = td['judge_score_pct'][mask]  # [n_contestants]
         judge_rank_score = td['judge_rank_score'][mask]  # [n_contestants]
         P_fan = P_fan_mean[mask]  # [n_contestants]
 
         # === 百分比法 ===
+        # 将 judge_score_pct 归一化为周内和=1，与 P_fan (softmax) 尺度一致
+        judge_sum = judge_score_pct_raw.sum()
+        if judge_sum > 1e-10:
+            S_judge_pct = judge_score_pct_raw / judge_sum
+        else:
+            S_judge_pct = np.ones(n_contestants) / n_contestants
         S_fan_pct = P_fan
-        S_judge_pct = judge_score_pct
         S_total_pct = S_fan_pct + S_judge_pct
 
         var_fan_pct = np.var(S_fan_pct)
@@ -476,11 +481,17 @@ def compute_variance_decomposition(datas):
         season = wd['season']
         week = wd['week']
 
-        judge_pct = td['judge_score_pct'][mask]
+        judge_pct_raw = td['judge_score_pct'][mask]
         judge_rank = td['judge_rank_score'][mask]
         P_fan = P_fan_mean[mask]
 
         # === 百分比法 ===
+        # 将 judge_score_pct 归一化为周内和=1，与 P_fan (softmax) 尺度一致
+        judge_sum = judge_pct_raw.sum()
+        if judge_sum > 1e-10:
+            judge_pct = judge_pct_raw / judge_sum
+        else:
+            judge_pct = np.ones(n_contestants) / n_contestants
         var_judge_pct = np.var(judge_pct)
         var_fan_pct = np.var(P_fan)
         var_total_pct = np.var(judge_pct + P_fan)

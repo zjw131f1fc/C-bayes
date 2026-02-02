@@ -52,7 +52,15 @@ def _build_vectorized_week_data(week_data, n_obs, judge_score_pct, judge_rank_sc
         week_mask[w, :n_cont] = True
         rule_method[w] = wd['rule_method']
         judge_save_active[w] = wd.get('judge_save_active', False)
-        judge_pct_padded[w, :n_cont] = judge_score_pct[indices]
+
+        # 评委分周内归一化（百分比法需要）
+        judge_pct_week = judge_score_pct[indices]
+        judge_sum = judge_pct_week.sum()
+        if judge_sum > 1e-10:
+            judge_pct_padded[w, :n_cont] = judge_pct_week / judge_sum
+        else:
+            judge_pct_padded[w, :n_cont] = np.ones(n_cont) / n_cont
+
         judge_rank_padded[w, :n_cont] = judge_rank_score[indices]
 
         # 反向映射
@@ -862,6 +870,9 @@ def generate_output(config, datas):
     # P_fan 归一化
     normalize_method = model_cfg.get('p_fan_normalize', 'softmax')
     T_fan = model_cfg.get('t_fan_init', 1.0)
+    # 如果学习 T_fan，使用后验均值
+    if model_cfg.get('learn_t_fan', False) and 'T_fan' in posterior:
+        T_fan = posterior['T_fan'].mean()
 
     P_fan = np.zeros(n_obs, dtype=np.float32)
     for wd in td['week_data']:
@@ -974,7 +985,14 @@ def predict(config, train_datas, eval_datas):
         for wd in td['week_data']:
             mask = wd['obs_mask']
             if wd['rule_method'] == 1:  # 百分比法
-                S[mask] = td['judge_score_pct'][mask] + P_fan[mask]
+                # 评委分也需要周内归一化，与 P_fan (softmax) 尺度一致
+                judge_pct_week = td['judge_score_pct'][mask]
+                judge_sum = judge_pct_week.sum()
+                if judge_sum > 1e-10:
+                    judge_pct_normalized = judge_pct_week / judge_sum
+                else:
+                    judge_pct_normalized = np.ones(len(judge_pct_week)) / len(judge_pct_week)
+                S[mask] = judge_pct_normalized + P_fan[mask]
             else:  # 排名法
                 P_week = P_fan[mask]
                 n_contestants = len(P_week)
