@@ -2,6 +2,7 @@
 
 import yaml
 import pickle
+import os
 
 
 def load_config(path):
@@ -18,5 +19,6 @@ def load_data(path):
 
 def save_data(datas, path):
     """保存数据字典到pickle"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'wb') as f:
         pickle.dump(datas, f)

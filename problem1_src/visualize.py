@@ -583,7 +583,7 @@ def generate_consistency_table(datas, output_dir):
     })
 
     # 保存为文本
-    with open(f'{output_dir}/table_consistency.txt', 'w') as f:
+    with open(f'{output_dir}/table_consistency.txt', 'w', encoding='utf-8') as f:
         # 表1：原始模型一致性
         f.write("Table 1: Model Consistency Summary (Before Filtering)\n")
         f.write("=" * 95 + "\n")
@@ -917,7 +917,7 @@ def plot_posterior_std_bar(datas, output_dir, feature_names=None):
     print(f"  Saved: {output_dir}/fig4_posterior_std.png")
 
     # 同时输出文本表格
-    with open(f'{output_dir}/table_posterior_std.txt', 'w') as f:
+    with open(f'{output_dir}/table_posterior_std.txt', 'w', encoding='utf-8') as f:
         f.write("Table: Parameter Posterior Standard Deviations\n")
         f.write("=" * 60 + "\n")
         f.write(f"{'Parameter':<35} {'Std':<15}\n")
