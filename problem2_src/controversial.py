@@ -57,10 +57,15 @@ def compute_rankings_both_methods(datas, celeb_id, target_season):
         n_contestants = len(indices)
 
         P_fan_week = P_fan_mean[mask]
-        judge_pct = td['judge_score_pct'][mask]
+        judge_pct_raw = td['judge_score_pct'][mask]
         judge_rank = td['judge_rank_score'][mask]
 
-        # 百分比法
+        # 百分比法: 评委分需要周内归一化
+        judge_sum = judge_pct_raw.sum()
+        if judge_sum > 1e-10:
+            judge_pct = judge_pct_raw / judge_sum
+        else:
+            judge_pct = np.ones(n_contestants) / n_contestants
         S_pct = judge_pct + P_fan_week
         rank_pct = np.argsort(np.argsort(-S_pct))[local_idx] + 1
 
@@ -310,11 +315,16 @@ def simulate_season_4scenarios(datas, target_season, n_simulations=1000):
 
                 # 计算得分
                 P_fan_week = P_fan[active_indices]
-                judge_pct = td['judge_score_pct'][active_indices]
+                judge_pct_raw = td['judge_score_pct'][active_indices]
                 judge_rank = td['judge_rank_score'][active_indices]
 
                 if use_pct:
-                    # 百分比法
+                    # 百分比法: 评委分需要周内归一化
+                    judge_sum = judge_pct_raw.sum()
+                    if judge_sum > 1e-10:
+                        judge_pct = judge_pct_raw / judge_sum
+                    else:
+                        judge_pct = np.ones(n_active) / n_active
                     S = judge_pct + P_fan_week
                 else:
                     # 排名法

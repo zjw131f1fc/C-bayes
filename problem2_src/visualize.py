@@ -70,8 +70,15 @@ def compute_scores_both_methods(datas):
         indices = np.where(mask)[0]
         n_contestants = len(indices)
 
-        # 百分比法: S = judge_pct + P_fan
-        S_pct_mean[mask] = td['judge_score_pct'][mask] + P_fan_mean[mask]
+        # 百分比法: S = judge_pct_normalized + P_fan
+        # 评委分需要周内归一化，与 P_fan (softmax) 尺度一致
+        judge_pct_week = td['judge_score_pct'][mask]
+        judge_sum = judge_pct_week.sum()
+        if judge_sum > 1e-10:
+            judge_pct_normalized = judge_pct_week / judge_sum
+        else:
+            judge_pct_normalized = np.ones(n_contestants) / n_contestants
+        S_pct_mean[mask] = judge_pct_normalized + P_fan_mean[mask]
 
         # 排名法: S = judge_rank + R_fan
         P_week = P_fan_mean[mask]
