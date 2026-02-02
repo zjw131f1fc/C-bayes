@@ -163,14 +163,27 @@ def main():
     print("\n1. 筛选后验样本...")
     week_valid_samples, week_info = filter_posterior_samples(results)
 
-    # 统计
+    # 获取样本数
+    n_samples = results['S_samples'].shape[0]
+
+    # 统计（分类统计）
     n_weeks = len(week_info)
+    n_no_elim = sum(1 for info in week_info if info['rate'] == 1.0 and info['n_valid'] == n_samples)
+    n_with_elim = n_weeks - n_no_elim
     n_controversial = sum(1 for info in week_info if info['controversial'])
-    avg_rate = np.mean([info['rate'] for info in week_info])
+    n_non_controversial = n_with_elim - n_controversial
+
+    # 只统计有淘汰周的平均复现率
+    rates_with_elim = [info['rate'] for info in week_info
+                       if not (info['rate'] == 1.0 and info['n_valid'] == n_samples)]
+    avg_rate = np.mean(rates_with_elim) if rates_with_elim else 1.0
 
     print(f"   总周数: {n_weeks}")
-    print(f"   争议性周（复现率<{CONTROVERSIAL_THRESHOLD*100:.0f}%）: {n_controversial}")
-    print(f"   平均复现率: {avg_rate*100:.1f}%")
+    print(f"     - 无淘汰周: {n_no_elim}")
+    print(f"     - 有淘汰周: {n_with_elim}")
+    print(f"       - 争议性周（复现率<{CONTROVERSIAL_THRESHOLD*100:.0f}%）: {n_controversial}")
+    print(f"       - 非争议性周: {n_non_controversial}")
+    print(f"   有淘汰周平均复现率: {avg_rate*100:.1f}%")
 
     # 计算筛选后的P_fan分布
     print("\n2. 计算筛选后P_fan分布...")
@@ -211,6 +224,7 @@ def main():
         if pred_elim_global == true_elim:
             correct += 1
 
+    assert total == n_non_controversial, f"统计不一致: total={total}, n_non_controversial={n_non_controversial}"
     print(f"   非争议性周一致性: {correct}/{total} ({correct/total*100:.1f}%)")
 
     # 保存结果
