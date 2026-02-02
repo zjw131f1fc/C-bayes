@@ -60,8 +60,8 @@ model:
 
   # P_fan 归一化方式
   p_fan_normalize: softmax  # 'linear' or 'softmax'
-  t_fan_init: 2.0           # softmax 温度参数（高温度 → 更平滑，保留小值差异）
-  learn_t_fan: true         # 是否学习温度参数
+  t_fan_init: 5.0           # softmax 温度参数（调整使两种方法偏向幅度对称）
+  learn_t_fan: false        # 固定温度，不学习
 
   # 评委拯救修正
   use_judge_save_correction: true  # 是否启用评委拯救修正

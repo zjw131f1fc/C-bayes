@@ -695,6 +695,10 @@ def extract_posterior(config, datas):
     if 'tau' in samples:
         datas['posterior_samples']['tau'] = np.array(samples['tau'])
 
+    # T_fan 温度参数
+    if 'T_fan' in samples:
+        datas['posterior_samples']['T_fan'] = np.array(samples['T_fan'])
+
     # Horseshoe 参数
     for key in ['tau_hs', 'c2_hs', 'lambda_hs', 'beta_raw']:
         if key in samples:
