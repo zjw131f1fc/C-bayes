@@ -131,6 +131,9 @@ def print_rhat_summary(diagnostics):
 
 def plot_rhat_histogram(diagnostics, output_dir):
     """绘制 R-hat 直方图"""
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
     all_rhats = []
     for param_name, diag in diagnostics.items():
         rhat = diag['rhat']
